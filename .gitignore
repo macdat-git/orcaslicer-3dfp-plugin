@@ -5,3 +5,6 @@ __pycache__/
 live/
 settings.json
 .env
+
+# Orca Cloud upload copies (build with tools/make_upload_files.py)
+dist/

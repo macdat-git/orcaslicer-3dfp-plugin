@@ -54,6 +54,15 @@ The panel shares the right-hand dock with other plugin panels (SlicePilot, Maker
 Searches only run when you press Search or Enter, filament details are cached for the session, and the spool list is fetched only when you press
 Refresh. A deduction for all slots is one request. The footer shows the remaining monthly quota (`API 982/1000`).
 
+## Orca Cloud upload files
+
+Orca Cloud wants the target OS at the end of the file name. The plugin is pure Python, so every target gets an identical copy:
+
+```powershell
+python tools/make_upload_files.py              # dist/threedfp_profiles_win_x86_64.py, _win_arm64, _macos_arm64, ...
+python tools/make_upload_files.py win_x86_64   # only the targets you name
+```
+
 ## Tests
 
 ```powershell
