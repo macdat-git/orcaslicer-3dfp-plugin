@@ -58,11 +58,13 @@ Refresh. A deduction for all slots is one request. The footer shows the remainin
 
 ## Orca Cloud upload files
 
-Orca Cloud wants the target OS at the end of the file name. The plugin is pure Python, so every target gets an identical copy:
+Orca Cloud requires a target suffix right before `.py`/`.whl`. It accepts exactly these: `any`, `win_x86_64`, `win_arm64`, `win`,
+`macosx_arm64`, `macosx_x86_64`, `macosx_universal`, `macosx`, `linux_x86_64`, `linux_arm64`, `linux`. The plugin is pure
+Python, so one `_any` file covers every OS:
 
 ```powershell
-python tools/make_upload_files.py              # dist/threedfp_profiles_win_x86_64.py, _win_arm64, _macos_arm64, ...
-python tools/make_upload_files.py win_x86_64   # only the targets you name
+python tools/make_upload_files.py              # dist/threedfp_profiles_any.py  <- upload this
+python tools/make_upload_files.py win_x86_64   # per-OS copies instead, if ever needed (identical content)
 ```
 
 **Icon:** upload `assets/icon.png`, a square 320×320 PNG with a transparent background. OrcaSlicer shows a plugin's picture
