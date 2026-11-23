@@ -1,3 +1,5 @@
+<img src="assets/icon.png" alt="3D Filament Profiles plugin logo" width="96" align="right">
+
 # 3D Filament Profiles plugin for OrcaSlicer 2.5
 
 Connects OrcaSlicer to [3dfilamentprofiles.com](https://3dfilamentprofiles.com) via its API
@@ -62,6 +64,10 @@ Orca Cloud wants the target OS at the end of the file name. The plugin is pure P
 python tools/make_upload_files.py              # dist/threedfp_profiles_win_x86_64.py, _win_arm64, _macos_arm64, ...
 python tools/make_upload_files.py win_x86_64   # only the targets you name
 ```
+
+**Icon:** upload `assets/icon.png`, a square 320×320 PNG with a transparent background. OrcaSlicer shows a plugin's picture
+from its Orca Cloud listing, and a plugin can't set it from its own file. The panel header uses an embedded copy, `assets/icon_64.png`.
+After changing the logo, run `python tools/embed_logo.py` to refresh that copy.
 
 ## Tests
 

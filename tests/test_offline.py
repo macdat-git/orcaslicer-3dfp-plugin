@@ -112,6 +112,13 @@ with tempfile.TemporaryDirectory() as d:
 check("plan", m.deduct_plan([12.3, 4.1, 0.0], {"1": "ABC123", "3": "XYZ"}), {"ABC123": 12.3})
 check("plan sums one spool", m.deduct_plan([1.0, 2.5], {"1": "A", "2": "A"}), {"A": 3.5})
 
+# --- embedded logo: a 64x64 PNG, and the panel HTML has the slot it goes into
+import base64, struct
+png = base64.b64decode(m.LOGO_PNG_B64)
+check("logo is a PNG", png[:8], b"\x89PNG\r\n\x1a\n")
+check("logo is 64x64", struct.unpack(">II", png[16:24]), (64, 64))
+check("panel has logo slot", m.PANEL_HTML.count("__LOGO__"), 1)
+
 # --- the panel's script is extracted so it can be syntax-checked: node --check <file>
 js = re.search(r"<script>(.*)</script>", m.PANEL_HTML, re.S).group(1)
 js_path = os.path.join(tempfile.gettempdir(), "threedfp_panel.js")
