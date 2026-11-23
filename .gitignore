@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.tmp
+# local test output / anything holding an API key
+live/
+settings.json
+.env
