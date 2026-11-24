@@ -82,6 +82,50 @@ with tempfile.TemporaryDirectory() as d:
     _, replaced2 = m.write_user_preset(d, preset, "2.5.2.0", os.path.join(d, "bk"))
     check("rewrite replaces", replaced2, True)
     check("backup kept", len(os.listdir(os.path.join(d, "bk"))), 1)
+    check("no .info written for a new preset", os.path.exists(path[:-5] + ".info"), False)
+
+# --- the .info OrcaSlicer keeps for Orca Cloud sync
+def info_file(d, name, body):
+    p = os.path.join(d, "filament", name + ".info")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(body)
+    return p
+
+
+def touch_json(d, name):
+    with open(os.path.join(d, "filament", name + ".json"), "w", encoding="utf-8") as f:
+        f.write("{}")
+
+
+with tempfile.TemporaryDirectory() as d:
+    # updating a synced preset: keep its cloud ID, mark it for upload, newer time
+    p = info_file(d, preset["name"], "sync_info = \nuser_id = u1\nsetting_id = 4d54290d-b529\nbase_id = GFSL95_19\nupdated_time = 1000\n")
+    touch_json(d, preset["name"])
+    path, _ = m.write_user_preset(d, dict(preset, setting_id="GFSL95_19", base_id="x", updated_time="1"), "2.5.2.0")
+    info = m.read_info(p)
+    check("update keeps cloud ID", info["setting_id"], "4d54290d-b529")
+    check("update marked for upload", info["sync_info"], "update")
+    check("update bumps time", int(info["updated_time"]) > 1000, True)
+    check("update keeps user and base", (info["user_id"], info["base_id"]), ("u1", "GFSL95_19"))
+    data = json.load(open(path, encoding="utf-8"))
+    check("sync fields kept out of the json", [k for k in m.INFO_KEYS if k in data], [])
+
+with tempfile.TemporaryDirectory() as d:
+    # a .info left from a removed preset: its old ID would get the new file deleted on the next sync
+    p = info_file(d, preset["name"], "sync_info = \nuser_id = u1\nsetting_id = old-id\nbase_id = GFSL95_19\nupdated_time = 1000\n")
+    m.write_user_preset(d, preset, "2.5.2.0")
+    info = m.read_info(p)
+    check("leftover info loses its ID", info["setting_id"], "")
+    check("leftover info not marked", info["sync_info"], "")
+
+with tempfile.TemporaryDirectory() as d:
+    # a preset waiting for its first upload stays that way
+    p = info_file(d, preset["name"], "sync_info = create\nuser_id = u1\nsetting_id = \nbase_id = GFSL95_19\nupdated_time = 1000\n")
+    touch_json(d, preset["name"])
+    m.write_user_preset(d, preset, "2.5.2.0")
+    info = m.read_info(p)
+    check("pending upload kept", (info["sync_info"], info["setting_id"]), ("create", ""))
 check("blocked word in file name", m.preset_file_name("Elegoo PLA Confetti @BBL P2S"), "Elegoo PLA C_onfetti @BBL P2S.json")
 check("bad chars in file name", m.preset_file_name('A/B: "C"?'), "A_B_ _C__.json")
 

@@ -32,6 +32,8 @@ A **3DFP** panel docks on the right of the Prepare/Preview tabs:
    same type if that one isn't enabled) and applies the 3DFP values on top. It shows as an unsaved edit, and you can save it from the filament settings.
 3. Also writes it as a user preset (`%APPDATA%\OrcaSlicer\user\<id>\filament\<name>.json`), which shows up in the filament list
    **after OrcaSlicer restarts**. If a file with that name already exists, the old one is backed up to the plugin's data folder first.
+   If you're signed in to Orca Cloud, OrcaSlicer uploads a new preset at that restart. An updated preset is marked in its `.info`
+   file so the change is uploaded too, rather than replaced by the older cloud copy.
 
 **Save preset** only does step 3.
 
@@ -77,7 +79,7 @@ After changing the logo, run `python tools/embed_logo.py` to refresh that copy.
 python tests/test_offline.py          # any Python 3.12+, no OrcaSlicer or API key needed
 ```
 
-The test script checks printer detection, setting serialization, preset file writing, base-preset choice and G-code
+The test script checks printer detection, setting serialization, preset file writing (including the Orca Cloud `.info`), base-preset choice and G-code
 parsing. It also loads the plugin against a stub `orca` module.
 
 ## Command-line API check (no OrcaSlicer needed)
@@ -91,4 +93,8 @@ parsing. It also loads the plugin against a stub `orca` module.
 ## Notes / limits
 
 - The OrcaSlicer plugin API can edit a slot's preset but can't create a new preset in a running session. That's why the saved preset file only appears after a restart, while the slot edit works right away.
+- Orca Cloud sync keeps a preset's cloud ID in the `.info` file next to its `.json`, and OrcaSlicer writes that file itself.
+  On each sync, OrcaSlicer deletes a local preset that has a cloud ID the cloud doesn't list. So never make up a `setting_id`:
+  leave it empty and OrcaSlicer uploads the preset as new. The plugin never writes one. It clears the ID in a `.info` left over
+  from a removed preset, and on an update it sets `sync_info = update` and a newer `updated_time`.
 - The API key is stored in plain text in `%APPDATA%\OrcaSlicer\orca_plugins\plugin_data\<plugin key>\settings.json`.

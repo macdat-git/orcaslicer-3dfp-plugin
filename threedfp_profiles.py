@@ -6,7 +6,7 @@
 # name = "3D Filament Profiles"
 # description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, and deduct what a print used from your 3DFP spools. Needs a 3DFP API key (subscription or Patreon)."
 # author = "Andy Mackey"
-# version = "1.0.2"
+# version = "1.0.3"
 # ///
 """OrcaSlicer 2.5 plugin for the 3D Filament Profiles API (https://3dfilamentprofiles.com/docs/api).
 
@@ -32,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PLUGIN_VERSION = "1.0.2"
+PLUGIN_VERSION = "1.0.3"
 SITE = "https://3dfilamentprofiles.com"
 API_BASE = SITE + "/api/v1"
 USER_AGENT = "OrcaSlicer-3DFP-Plugin/" + PLUGIN_VERSION
@@ -250,10 +250,16 @@ def preset_file_name(name):
     return base + ".json"
 
 
+# Sync fields OrcaSlicer keeps in the preset's .info file, never in its .json.
+INFO_KEYS = ("setting_id", "base_id", "user_id", "sync_info", "updated_time")
+
+
 def user_preset_json(preset, app_version=""):
     """3DFP's preset -> the JSON OrcaSlicer keeps for a user filament preset."""
     data = dict(preset)
     data.pop("type", None)
+    for k in INFO_KEYS:
+        data.pop(k, None)
     name = str(data.get("name") or "3DFP filament")
     data["name"] = name
     data["from"] = "User"
@@ -283,7 +289,50 @@ def write_user_preset(user_dir, preset, app_version="", backup_dir=None):
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(data, f, indent=4, ensure_ascii=False, sort_keys=True)
     os.replace(tmp, path)
+    refresh_info(path, replaced)
     return path, replaced
+
+
+def read_info(path):
+    """A preset's .info file ("key = value" lines) -> {key: value}, in file order."""
+    info = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            k, sep, v = line.partition("=")
+            if sep:
+                info[k.strip()] = v.strip()
+    return info
+
+
+def refresh_info(json_path, replaced):
+    """Bring the preset's .info in step with a .json the plugin just wrote, so Orca Cloud sync keeps it.
+
+    OrcaSlicer writes the .info itself and records the preset's cloud ID there. On each sync it deletes a local
+    preset whose ID the cloud doesn't list, unless it's marked as syncing. It also keeps whichever copy has the newer
+    updated_time. So:
+    - no .info: leave it to OrcaSlicer, which uploads the preset as new;
+    - a .info left over from a removed preset: clear its ID, so it's uploaded as new instead of deleted;
+    - an updated preset: newer updated_time and sync_info "update", so the change is uploaded, not overwritten.
+    Returns the info written, or None."""
+    info_path = os.path.splitext(json_path)[0] + ".info"
+    if not os.path.exists(info_path):
+        return None
+    info = read_info(info_path)
+    setting_id = info.get("setting_id", "")
+    if not replaced or setting_id in ("", "null"):
+        info["setting_id"] = ""
+        if info.get("sync_info") != "create":
+            info["sync_info"] = ""
+    elif info.get("sync_info") != "create":
+        info["sync_info"] = "update"
+    info["updated_time"] = str(int(time.time()))
+    for k in INFO_KEYS:
+        info.setdefault(k, "")
+    tmp = info_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.writelines("%s = %s\n" % (k, v) for k, v in info.items())
+    os.replace(tmp, info_path)
+    return info
 
 
 def pick_base(inherits, ftype, catalog):
