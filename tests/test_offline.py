@@ -242,6 +242,8 @@ cap.set_setting("printer", "P2S")
 check("settings persist", cap.settings()["printer"], "P2S")
 check("defaults kept", cap.settings()["save_preset"], True)
 check("auto-link on by default", cap.settings()["auto_link"], True)
+check("auto-deduct on by default", m.DEFAULTS["auto_deduct"], True)
+cap.set_setting("auto_deduct", False)  # the offer-to-deduct path below
 
 # the print-start path with a stub UI and API: auto-links, then offers to deduct
 notes = []

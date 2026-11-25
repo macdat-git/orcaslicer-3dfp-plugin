@@ -37,8 +37,10 @@ A **3DFP** panel docks on the right of the Prepare/Preview tabs:
 
 **Save preset** only does step 3.
 
-**Spool deduction:** after slicing, the grams per slot are read from the G-code. When a print starts, a notification
-offers to subtract them from the slots' spools (or does it automatically if you turn that on). The deduction itself is one API request.
+**Spool deduction:** after slicing, the grams per slot are read from the G-code. When a print is sent, the plugin
+subtracts them from the slots' spools and shows the result as a notification. This is on by default. If you turn off **Deduct
+without asking** in Settings, you get a notification with a **Deduct** link instead, or you can use the **Deduct from 3DFP spools**
+button in Slots. The deduction itself is one API request.
 
 Which spool a slot uses:
 1. The spool you picked for it in **Slots** (or set with **Use in slot** on a spool), if any.

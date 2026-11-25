@@ -6,7 +6,7 @@
 # name = "3D Filament Profiles"
 # description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, and deduct what a print used from your 3DFP spools. Needs a 3DFP API key (subscription or Patreon)."
 # author = "Andy Mackey"
-# version = "1.1.0"
+# version = "1.1.1"
 # ///
 """OrcaSlicer 2.5 plugin for the 3D Filament Profiles API (https://3dfilamentprofiles.com/docs/api).
 
@@ -32,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.1.1"
 SITE = "https://3dfilamentprofiles.com"
 API_BASE = SITE + "/api/v1"
 USER_AGENT = "OrcaSlicer-3DFP-Plugin/" + PLUGIN_VERSION
@@ -825,7 +825,7 @@ DEFAULTS = {
     "save_preset": True,
     "set_color": True,
     "offer_deduct": True,
-    "auto_deduct": False,
+    "auto_deduct": True,   # deduct as soon as a print is sent (the result shows as a notification)
     "auto_link": True,     # match used slots to the spools 3DFP has in this printer's AMS
     "auto_open": True,
     "slot_spools": {},     # {"1": "ABC123"}
