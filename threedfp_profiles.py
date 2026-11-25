@@ -6,7 +6,7 @@
 # name = "3D Filament Profiles"
 # description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, and deduct what a print used from your 3DFP spools. Needs a 3DFP API key (subscription or Patreon)."
 # author = "Andy Mackey"
-# version = "1.0.3"
+# version = "1.1.0"
 # ///
 """OrcaSlicer 2.5 plugin for the 3D Filament Profiles API (https://3dfilamentprofiles.com/docs/api).
 
@@ -32,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PLUGIN_VERSION = "1.0.3"
+PLUGIN_VERSION = "1.1.0"
 SITE = "https://3dfilamentprofiles.com"
 API_BASE = SITE + "/api/v1"
 USER_AGENT = "OrcaSlicer-3DFP-Plugin/" + PLUGIN_VERSION
@@ -400,6 +400,116 @@ def deduct_plan(grams, slot_spools):
     return out
 
 
+# --- auto-link: each used slot -> the spool 3DFP has in this printer's AMS (AMS sync, or the user, keeps the
+# locations current). The OrcaSlicer plugin API doesn't expose the AMS mapping of a print job, so this matches the
+# way OrcaSlicer's own auto-mapping does: same filament type, then the closest colour, then AMS order.
+LOCATION_RE = re.compile(r"^\s*Printer:\s*(?P<printer>[^,]+?)\s*,\s*(?P<where>.+?)\s*$", re.I)
+AMS_RE = re.compile(r"^AMS:\s*(HT-)?([A-H])-(\d+)$", re.I)
+
+
+def spool_position(location):
+    """'Printer: H2C, AMS: A-1' -> ('H2C', 'A-1', sort key); external spools sort last. None for other places."""
+    m = LOCATION_RE.match(location or "")
+    if not m:
+        return None
+    printer, where = m.group("printer"), m.group("where")
+    a = AMS_RE.match(where)
+    if a:
+        ht = bool(a.group(1))
+        return printer, ("HT-" if ht else "") + a.group(2).upper() + "-" + a.group(3), (int(ht), a.group(2).upper(), int(a.group(3)))
+    n = re.search(r"(\d+)\s*$", where)
+    return printer, where, (2, "", int(n.group(1)) if n else 0)
+
+
+def _word_in(word, text):
+    return bool(word) and re.search(r"(?<![a-z0-9])" + re.escape(word.lower()) + r"(?![a-z0-9])", (text or "").lower())
+
+
+def printer_spools(spools, printer_name, code=""):
+    """The 3DFP printer whose name appears in the OrcaSlicer printer preset name (or equals the printer code),
+    and its spools as [(label, sort key, spool)]. ("", []) if none or more than one printer matches."""
+    groups = {}
+    for sp in spools or []:
+        pos = spool_position(sp.get("location"))
+        if pos:
+            groups.setdefault(pos[0], []).append((pos[1], pos[2], sp))
+    hits = [p for p in groups if _word_in(p, printer_name) or (code and p.lower() == code.lower())]
+    if len(hits) != 1:
+        return "", []
+    return hits[0], sorted(groups[hits[0]], key=lambda t: t[1])
+
+
+def _ftype(t):
+    return re.sub(r"[\s_]+", "-", str(t or "").strip().upper())
+
+
+def type_score(slot_type, spool):
+    """2: same type (PLA = PLA, or PLA-CF = PLA + CF); 1: same base type (PLA-CF vs PLA); 0: different."""
+    st, mat = _ftype(slot_type), _ftype(spool.get("material"))
+    if not st or not mat:
+        return 0
+    if st == mat or st == _ftype("%s-%s" % (spool.get("material"), spool.get("material_type"))):
+        return 2
+    return 1 if st.split("-")[0] == mat.split("-")[0] else 0
+
+
+def _rgb(h):
+    h = first_hex(h)
+    return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5)) if h else None
+
+
+def colour_distance(a, b):
+    """'Redmean' RGB distance, 0 (same) to about 765. Unknown colours count as far apart."""
+    p, q = _rgb(a), _rgb(b)
+    if not p or not q:
+        return 999.0
+    r = (p[0] + q[0]) / 2
+    dr, dg, db = p[0] - q[0], p[1] - q[1], p[2] - q[2]
+    return ((2 + r / 256) * dr * dr + 4 * dg * dg + (2 + (255 - r) / 256) * db * db) ** 0.5
+
+
+def link_slots(slots, grams, spools, printer_name, code="", manual=None):
+    """Choose a spool for every slot that used filament.
+    slots: [{"preset", "color", "type"}] (slot 1 first); grams: per-slot grams; manual: {"1": short code} links the
+    user set, which win. -> (links {"1": {"code", "source", "where", "alts"}}, unmatched [{"slot", "why"}])."""
+    manual = manual or {}
+    links, unmatched, taken = {}, [], set()
+    used = [str(i) for i, g in enumerate(grams or [], 1) if g and g > 0.005]
+    for k in used:
+        if manual.get(k):
+            links[k] = {"code": manual[k], "source": "manual", "where": "", "alts": []}
+            taken.add(manual[k])
+    printer, here = printer_spools(spools, printer_name, code)
+    for k in used:
+        if k in links:
+            continue
+        sl = slots[int(k) - 1] if int(k) <= len(slots) else {}
+        if not here:
+            unmatched.append({"slot": k, "why": "3DFP has no spools in a printer named like “%s”" % (printer_name or code)})
+            continue
+        cands = []
+        for label, key, sp in here:
+            if (sp.get("remaining_grams") or 0) <= 0:
+                continue
+            ts = type_score(sl.get("type"), sp)
+            if ts:
+                cands.append((-ts, round(colour_distance(sl.get("color"), sp.get("rgb"))), sp.get("short_code") in taken,
+                              key, label, sp))
+        if not cands:
+            unmatched.append({"slot": k, "why": "no %s spool in %s's AMS on 3DFP" % (sl.get("type") or "matching", printer)})
+            continue
+        cands.sort(key=lambda c: c[:4])
+        best = cands[0]
+        alts = [c[4] for c in cands[1:] if c[0] == best[0] and abs(c[1] - best[1]) <= 1]
+        links[k] = {"code": best[5].get("short_code"), "source": "auto", "where": "%s %s" % (printer, best[4]), "alts": alts}
+        taken.add(best[5].get("short_code"))
+    return links, unmatched
+
+
+def links_plan(grams, links):
+    return deduct_plan(grams, {k: v["code"] for k, v in (links or {}).items()})
+
+
 # ---------------------------------------------------------------------------
 # docked panel
 # ---------------------------------------------------------------------------
@@ -609,6 +719,7 @@ a{color:var(--accent);cursor:pointer;text-decoration:none}
   <label class="check"><input type="checkbox" id="s_color"><span><b>Set the slot colour</b> from the filament</span></label>
   <label class="check"><input type="checkbox" id="s_offer"><span><b>Offer to deduct</b> filament from 3DFP spools when a print starts</span></label>
   <label class="check"><input type="checkbox" id="s_auto"><span><b>Deduct without asking</b> when a print starts</span></label>
+  <label class="check"><input type="checkbox" id="s_link"><span><b>Link slots to spools automatically</b><br><span class="meta" style="white-space:normal">A slot with no spool picked in Slots uses the spool 3DFP has in this printer's AMS with the same type and closest colour (keep 3DFP locations current, e.g. with AMS sync).</span></span></label>
   <label class="check"><input type="checkbox" id="s_open"><span><b>Open this panel</b> when OrcaSlicer opens a project</span></label>
 </section>
 <div id="out"></div>
@@ -665,20 +776,20 @@ function renderSpools(){const box=$('slist');const f=$('sq').value.trim().toLowe
  box.querySelectorAll('.item').forEach(el=>el.onclick=()=>{OPEN='s'+el.dataset.code;renderSpools()});wireActions(box);}
 $('sref').onclick=()=>post({type:'spools'});$('sq').oninput=renderSpools;$('sempty').onchange=renderSpools;
 function renderSlots(){const box=$('slotlist');if(!S.slots.length){box.innerHTML='<div class="meta">No filament slots (open the Prepare tab).</div>';return}
- const opts=c=>'<option value="">\u2014 no spool \u2014</option>'+SPOOLS.filter(s=>s.remaining_grams>0||s.short_code===c).map(s=>'<option value="'+esc(s.short_code)+'"'+(s.short_code===c?' selected':'')+'>'+esc(s.short_code)+' \u00b7 '+spoolLabel(s)+' ('+esc(s.remaining_grams)+' g)</option>').join('')+
+ const opts=c=>'<option value="">\u2014 '+((S.settings||{}).auto_link?'auto':'no spool')+' \u2014</option>'+SPOOLS.filter(s=>s.remaining_grams>0||s.short_code===c).map(s=>'<option value="'+esc(s.short_code)+'"'+(s.short_code===c?' selected':'')+'>'+esc(s.short_code)+' \u00b7 '+spoolLabel(s)+' ('+esc(s.remaining_grams)+' g)</option>').join('')+
   (c&&!SPOOLS.some(s=>s.short_code===c)?'<option value="'+esc(c)+'" selected>'+esc(c)+'</option>':'');
  box.innerHTML=S.slots.map((s,i)=>{const c=S.slot_spools[String(i+1)]||'';return '<div class="slot">'+sw(s.color)+'<div class="meta" title="'+esc(s.preset)+'">Slot '+(i+1)+': '+esc(s.preset)+'</div><span></span><select data-slot="'+(i+1)+'">'+opts(c)+'</select></div>'}).join('');
  box.querySelectorAll('select').forEach(el=>el.onchange=()=>post({type:'map',slot:+el.dataset.slot,code:el.value}));
- const ls=S.last_slice;if(ls&&ls.grams&&ls.grams.length){$('slice').innerHTML=ls.grams.map((g,i)=>'Slot '+(i+1)+': <b>'+g.toFixed(2)+' g</b>'+(S.slot_spools[String(i+1)]?' \u2192 '+esc(S.slot_spools[String(i+1)]):'')).join('<br>')+
+ const ls=S.last_slice;if(ls&&ls.grams&&ls.grams.length){const L=ls.links||ls.preview||{};$('slice').innerHTML=ls.grams.map((g,i)=>{const l=L[String(i+1)];return 'Slot '+(i+1)+': <b>'+g.toFixed(2)+' g</b>'+(l?' \u2192 '+esc(l.code)+(l.source==='auto'?' <span>(auto, '+esc(l.where)+(l.alts&&l.alts.length?', or '+esc(l.alts.join('/')):'')+')</span>':''):(g>0.005?' \u2192 <span>no spool</span>':''))}).join('<br>')+
   '<br><span>'+esc(ls.when||'')+(ls.deducted?' \u00b7 already deducted':'')+'</span>';$('deduct').disabled=!S.plan_ok||ls.deducted;}
  else{$('slice').textContent='Slice a plate to see the grams per slot.';$('deduct').disabled=true}}
 $('slref').onclick=()=>post({type:'state'});$('deduct').onclick=()=>post({type:'deduct'});
 function fillSettings(){const st=S.settings||{};const sel=$('s_printer');sel.innerHTML=(S.printer_choices||['auto']).map(p=>'<option'+(p===st.printer?' selected':'')+'>'+esc(p)+'</option>').join('');
  $('s_nozzle').value=st.nozzle||'auto';$('s_pa').checked=!!st.pressure_advance;$('s_save').checked=!!st.save_preset;$('s_color').checked=!!st.set_color;
- $('s_offer').checked=!!st.offer_deduct;$('s_auto').checked=!!st.auto_deduct;$('s_open').checked=!!st.auto_open;
+ $('s_offer').checked=!!st.offer_deduct;$('s_auto').checked=!!st.auto_deduct;$('s_link').checked=!!st.auto_link;$('s_open').checked=!!st.auto_open;
  $('keyinfo').textContent=S.has_key?'Saved key ends in \u2026'+S.key_tail+'. Paste a new one to replace it.':'Starts with 3dfp_. Stored in this plugin\'s data folder.';}
 [['s_printer','printer'],['s_nozzle','nozzle']].forEach(([id,k])=>$(id).onchange=()=>post({type:'set',key:k,value:$(id).value}));
-[['s_pa','pressure_advance'],['s_save','save_preset'],['s_color','set_color'],['s_offer','offer_deduct'],['s_auto','auto_deduct'],['s_open','auto_open']].forEach(([id,k])=>$(id).onchange=()=>post({type:'set',key:k,value:$(id).checked}));
+[['s_pa','pressure_advance'],['s_save','save_preset'],['s_color','set_color'],['s_offer','offer_deduct'],['s_auto','auto_deduct'],['s_link','auto_link'],['s_open','auto_open']].forEach(([id,k])=>$(id).onchange=()=>post({type:'set',key:k,value:$(id).checked}));
 $('savekey').onclick=()=>{const v=$('key').value.trim();if(v){post({type:'set',key:'api_key',value:v});$('key').value=''}};
 function showResult(r){const ul=a=>a&&a.length?'<ul>'+a.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'';
  $('out').innerHTML='<div class="msg '+(r.ok?'ok':'err')+'"><b>'+esc(r.title)+'</b>'+ul(r.lines)+(r.more&&r.more.length?'<details><summary>Details</summary>'+ul(r.more)+'</details>':'')+'</div>';
@@ -715,6 +826,7 @@ DEFAULTS = {
     "set_color": True,
     "offer_deduct": True,
     "auto_deduct": False,
+    "auto_link": True,     # match used slots to the spools 3DFP has in this printer's AMS
     "auto_open": True,
     "slot_spools": {},     # {"1": "ABC123"}
     "preset_spools": {},   # {preset name: short code}, to relink a slot when that preset is selected again
@@ -782,6 +894,8 @@ if orca is not None:
             self.client = None
             self.spools = []
             self.last_slice = {}
+            self.last_state = None
+            self.seen_events = set()
 
         # ----- identity
         def get_name(self):
@@ -823,6 +937,9 @@ if orca is not None:
 
         def on_lifecycle_event(self, event, ctx):
             name = getattr(event, "name", "") or str(event).rsplit(".", 1)[-1]
+            if name not in self.seen_events:
+                self.seen_events.add(name)
+                self.log("event seen: " + name)
             if name == "GCodeExportFinished":
                 self._on_gcode(ctx)
             elif name == "PrintJobStarted":
@@ -928,7 +1045,14 @@ if orca is not None:
                         colors = as_list(b.full_config_value("filament_colour"))
                     except Exception:
                         colors = []
-                    st["slots"] = [{"preset": n, "color": colors[i] if i < len(colors) else ""} for i, n in enumerate(names)]
+                    try:
+                        types = as_list(b.full_config_value("filament_type"))
+                    except Exception:
+                        types = []
+                    if len(types) < len(names):  # fall back to each preset's own type
+                        types = list(types) + [self._preset_type(b, n) for n in names[len(types):]]
+                    st["slots"] = [{"preset": n, "color": colors[i] if i < len(colors) else "", "type": types[i] or ""}
+                                   for i, n in enumerate(names)]
                 except Exception:
                     pass
                 st["catalog"] = self._catalog(b)
@@ -942,6 +1066,12 @@ if orca is not None:
             if s.get("nozzle") not in (None, "", "auto"):
                 st["nozzle"] = s["nozzle"]
             return st
+
+        def _preset_type(self, b, name):
+            try:
+                return (as_list(b.filaments.find_preset(name).config_value("filament_type")) or [""])[0]
+            except Exception:
+                return ""
 
         def _catalog(self, b):
             out = {}
@@ -1000,14 +1130,26 @@ if orca is not None:
             if changed:
                 self.set_setting("slot_spools", slot_spools)
             key = s.get("api_key") or ""
-            plan = deduct_plan(self.last_slice.get("grams") or [], slot_spools)
+            self.last_state = st if st.get("slots") else self.last_state
+            ls = self.last_slice
+            if ls.get("grams") and not ls.get("deducted"):
+                if s.get("auto_link", True):
+                    links, unmatched = link_slots(ls.get("slots") or st["slots"], ls["grams"], self.spools,
+                                                  ls.get("printer_name") or st["printer_name"],
+                                                  ls.get("printer_code") or st["printer_code"], slot_spools)
+                else:
+                    links, _ = link_slots([], ls["grams"], [], "", "", slot_spools)
+                ls["preview"] = {k: {"code": v["code"], "source": v["source"], "where": v["where"], "alts": v["alts"]}
+                                 for k, v in links.items()}
+            plan = links_plan(ls.get("grams") or [], ls.get("preview") or {})
             self.post({
                 "type": "state", "printer_name": st["printer_name"], "printer_code": st["printer_code"],
                 "nozzle": st["nozzle"], "slots": st["slots"], "slot_spools": slot_spools,
                 "settings": {k: s[k] for k in ("printer", "nozzle", "pressure_advance", "save_preset", "set_color",
-                                               "offer_deduct", "auto_deduct", "auto_open")},
+                                               "offer_deduct", "auto_deduct", "auto_link", "auto_open")},
                 "printer_choices": PRINTER_CHOICES, "has_key": bool(key), "key_tail": key[-4:] if key else "",
-                "spools": self.spools, "last_slice": self.last_slice, "plan_ok": bool(plan),
+                "spools": self.spools, "last_slice": {k: v for k, v in ls.items() if k in ("grams", "when", "deducted", "preview", "links")},
+                "plan_ok": bool(plan) or bool(ls.get("grams") and s.get("auto_link", True) and key),
             })
             if self.client and self.client.quota:
                 self.post(dict(type="quota", **self.client.quota))
@@ -1207,6 +1349,30 @@ if orca is not None:
             return applied, skipped
 
         # ----- filament use -> 3DFP spools
+        def log(self, text):
+            """events.log in the plugin's data folder: slices, print starts, links and deductions, for checking later."""
+            try:
+                path = os.path.join(storage_dir(), "events.log")
+                if os.path.exists(path) and os.path.getsize(path) > 256_000:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        keep = f.read()[-128_000:]
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(keep[keep.find("\n") + 1:])
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text.replace("\n", " ") + "\n")
+            except Exception:
+                pass
+
+        def _state_safe(self):
+            try:
+                st = self.host_state()
+                if st.get("slots"):
+                    self.last_state = st
+                    return st
+            except Exception:
+                pass
+            return self.last_state or {"slots": [], "printer_name": "", "printer_code": "ANY"}
+
         def _on_gcode(self, ctx):
             ok = getattr(getattr(orca, "LifecycleEvtCode", None), "Ok", None)
             path = str(getattr(ctx, "msg", "") or "")
@@ -1214,51 +1380,125 @@ if orca is not None:
                 return
             try:
                 grams = gcode_grams(path)
-            except OSError:
+            except OSError as e:
+                self.log("slice: couldn't read the G-code (%s: %s)" % (type(e).__name__, e))
                 return
             if grams:
-                self.last_slice = {"grams": grams, "when": time.strftime("sliced %H:%M"), "deducted": False}
+                st = self._state_safe()
+                self.last_slice = {"grams": grams, "when": time.strftime("sliced %H:%M"), "deducted": False,
+                                   "slots": st.get("slots") or [], "printer_name": st.get("printer_name", ""),
+                                   "printer_code": st.get("printer_code", "")}
+                self.log("slice: %s g on %s" % (", ".join("%.2f" % g for g in grams), st.get("printer_name") or "?"))
                 self.post({"type": "refresh"})
+            else:
+                self.log("slice: no filament stats in " + os.path.basename(path))
 
         def _on_print_started(self):
             s = self.settings()
-            plan = deduct_plan(self.last_slice.get("grams") or [], s.get("slot_spools") or {})
-            if not plan or self.last_slice.get("deducted") or not s.get("api_key"):
+            if not (s.get("auto_deduct") or s.get("offer_deduct")):
                 return
-            if s.get("auto_deduct"):
+            if not self.last_slice.get("grams"):
+                self.log("print started: no slice in this session, nothing to deduct")
+                self.notify("a print started, but there's no slice from this session to deduct.", warn=True)
+                return
+            if self.last_slice.get("deducted"):
+                self.log("print started: this slice was already deducted")
+                return
+            threading.Thread(target=self._print_started_job, name="3dfp-print", daemon=True).start()
+
+        def _print_started_job(self):
+            try:
+                plan, links, unmatched = self.resolve_links(refresh=True)
+            except ApiError as e:
+                self.log("print started: %s" % e.friendly())
+                self.notify("couldn't read your spools, nothing deducted: " + e.friendly(), warn=True)
+                return
+            except Exception as e:
+                self.log("print started: %s: %s" % (type(e).__name__, e))
+                return
+            self.log("print started: links %s; plan %s%s" % (
+                json.dumps({k: [v["code"], v["source"], v["where"]] + (["or " + "/".join(v["alts"])] if v["alts"] else [])
+                            for k, v in links.items()}),
+                json.dumps(plan), "; unmatched " + json.dumps(unmatched) if unmatched else ""))
+            self.post({"type": "refresh"})
+            if unmatched:
+                self.notify("not deducted for " + "; ".join("slot %s (%s)" % (u["slot"], u["why"]) for u in unmatched)
+                            + ". Pick the spool in the 3DFP panel's Slots tab.", warn=True)
+            if not plan:
+                return
+            if self.settings().get("auto_deduct"):
                 self.start_deduct(manual=False)
-            elif s.get("offer_deduct"):
-                text = ", ".join("%.1f g from %s" % (g, c) for c, g in plan.items())
-                try:
-                    lvl = orca.host.ui.NotificationLevel
-                    orca.host.ui.push_notification(lvl.RegularNotificationLevel, "3DFP: deduct " + text + "?",
-                                                   hyper_text="Deduct", on_click=lambda: (self.start_deduct(False), True)[1])
-                except Exception:
-                    pass
+                return
+            text = ", ".join("%.1f g from %s" % (g, self._spool_name(c, links)) for c, g in plan.items())
+            try:
+                lvl = orca.host.ui.NotificationLevel
+                orca.host.ui.push_notification(lvl.RegularNotificationLevel, "3DFP: deduct " + text + "?",
+                                               hyper_text="Deduct", on_click=lambda: (self.start_deduct(False), True)[1])
+            except Exception as e:
+                self.log("couldn't show the deduct notification: %s" % e)
+
+        def _spool_name(self, code, links=None):
+            sp = next((x for x in self.spools if x.get("short_code") == code), None) or {}
+            where = next((v["where"] for v in (links or {}).values() if v["code"] == code and v["where"]), "")
+            name = " ".join(str(x) for x in (sp.get("material"), sp.get("material_type"), sp.get("color")) if x)
+            info = ", ".join(x for x in (name, where) if x)
+            return "%s (%s)" % (code, info) if info else code
+
+        def resolve_links(self, refresh):
+            """Links for the last slice: the user's links first, then auto-links from the spools' 3DFP locations.
+            refresh: reload the spool list first (1 request), since AMS changes move spools. Worker thread only."""
+            s = self.settings()
+            ls = self.last_slice
+            grams = ls.get("grams") or []
+            manual = dict(s.get("slot_spools") or {})
+            need = [str(k) for k, g in enumerate(grams, 1) if g > 0.005 and not manual.get(str(k))]
+            if not s.get("auto_link", True):
+                links, _ = link_slots([], grams, [], "", "", manual)
+                unmatched = [{"slot": k, "why": "no spool linked"} for k in need]
+            else:
+                if need and refresh and s.get("api_key"):
+                    self.job_spools()
+                links, unmatched = link_slots(ls.get("slots") or [], grams, self.spools, ls.get("printer_name", ""),
+                                              ls.get("printer_code", ""), manual)
+            plan = links_plan(grams, links)
+            ls.update(links=links, unmatched=unmatched, plan=plan)
+            return plan, links, unmatched
 
         def start_deduct(self, manual):
-            plan = deduct_plan(self.last_slice.get("grams") or [], self.settings().get("slot_spools") or {})
-            if not plan:
-                if manual:
-                    self.result(False, "Nothing to deduct: slice first and link a spool to each slot.")
-                return
             if self.last_slice.get("deducted"):
                 if manual:
                     self.result(False, "This slice was already deducted.")
                 return
-            self.spawn("Updating your 3DFP spools\u2026", self.job_deduct, plan, manual)
+            if not self.last_slice.get("grams"):
+                if manual:
+                    self.result(False, "Nothing to deduct: slice first.")
+                return
+            self.spawn("Updating your 3DFP spools…", self.job_deduct, manual)
 
-        def job_deduct(self, plan, manual):
+        def job_deduct(self, manual):
+            if not manual and self.last_slice.get("plan"):  # resolved when the print started
+                plan = self.last_slice["plan"]
+                links = self.last_slice.get("links") or {}
+                unmatched = self.last_slice.get("unmatched") or []
+            else:
+                plan, links, unmatched = self.resolve_links(refresh=True)
+            if not plan:
+                self.log("deduct: nothing to deduct; unmatched " + json.dumps(unmatched))
+                self.result(False, "Nothing to deduct", ["Slot %s: %s" % (u["slot"], u["why"]) for u in unmatched]
+                            or ["No slot used filament."])
+                return
             r = self.api().deduct(plan) or {}
             ok_lines, bad = [], []
             for e in r.get("data") or []:
                 if e.get("error"):
                     bad.append("%s: %s" % (e.get("short_code"), (e["error"] or {}).get("message")))
                 else:
-                    ok_lines.append("%s: \u2212%s g, %s g left" % (e.get("short_code"), e.get("deducted_grams"), e.get("remaining_grams")))
+                    ok_lines.append("%s: −%s g, %s g left" % (self._spool_name(e.get("short_code"), links),
+                                                                   e.get("deducted_grams"), e.get("remaining_grams")))
                     for sp in self.spools:
                         if sp.get("short_code") == e.get("short_code"):
                             sp["remaining_grams"] = e.get("remaining_grams")
+            self.log("deduct (%s): %s" % ("button" if manual else "print start", "; ".join(ok_lines + bad) or "no answer"))
             if ok_lines:
                 self.last_slice["deducted"] = True
                 try:
@@ -1266,7 +1506,8 @@ if orca is not None:
                 except OSError:
                     pass
                 self.post({"type": "spools", "spools": self.spools})
-            self.result(not bad, "Spools updated" if not bad else "Some spools weren't updated", ok_lines + bad)
+            more = ["Slot %s not deducted: %s" % (u["slot"], u["why"]) for u in unmatched]
+            self.result(not bad, "Spools updated" if not bad else "Some spools weren't updated", ok_lines + bad, more)
             if not manual:
                 self.notify("deducted " + "; ".join(ok_lines) if ok_lines else "spool update failed: " + "; ".join(bad),
                             warn=bool(bad))

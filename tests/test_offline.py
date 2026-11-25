@@ -156,6 +156,55 @@ with tempfile.TemporaryDirectory() as d:
 check("plan", m.deduct_plan([12.3, 4.1, 0.0], {"1": "ABC123", "3": "XYZ"}), {"ABC123": 12.3})
 check("plan sums one spool", m.deduct_plan([1.0, 2.5], {"1": "A", "2": "A"}), {"A": 3.5})
 
+# --- auto-link: used slots -> the spools 3DFP places in this printer's AMS (shaped like /my/spools, values made up)
+def sp(code, mat, mtype, rgb, loc, grams=500):
+    return {"short_code": code, "material": mat, "material_type": mtype, "rgb": rgb, "location": loc, "remaining_grams": grams}
+
+
+spools = [sp("Y1", "PETG", "Basic", "#FCE300", "Printer: H2C, AMS: A-1"),
+          sp("K2", "PETG", "Basic", "#000000", "Printer: H2C, AMS: A-2"),
+          sp("K3", "PETG", "Basic", "#000000", "Printer: H2C, AMS: A-3"),
+          sp("G4", "PETG", "High Speed Matte", "#63666A", "Printer: H2C, AMS: A-4"),
+          sp("B5", "PLA", "Silk+", "#008BDA", "Printer: H2C, AMS: B-4"),
+          sp("A6", "ASA", "Basic", "#000000", "Printer: H2C, AMS: HT-A-1"),
+          sp("E7", "PLA", "Basic", "#FFFFFF", "Printer: H2C, External Spool 1", 0),
+          sp("P8", "PLA", "Basic", "#000000", "Printer: P2S, AMS: A-1"),
+          sp("S9", "PLA", "Basic", "#000000", "Shelf")]
+check("position AMS", m.spool_position("Printer: H2C, AMS: B-4"), ("H2C", "B-4", (0, "B", 4)))
+check("position HT", m.spool_position("Printer: H2C, AMS: HT-A-1"), ("H2C", "HT-A-1", (1, "A", 1)))
+check("position external", m.spool_position("Printer: H2C, External Spool 2")[2], (2, "", 2))
+check("position shelf", m.spool_position("Shelf: Closet Shelf 3"), None)
+check("printer from preset name", m.printer_spools(spools, "Bambu Lab H2C 0.4 nozzle")[0], "H2C")
+check("printer P2S", [t[2]["short_code"] for t in m.printer_spools(spools, "Bambu Lab P2S 0.4 nozzle")[1]], ["P8"])
+check("printer unknown", m.printer_spools(spools, "Voron 2.4"), ("", []))
+check("type same", m.type_score("PLA", spools[4]), 2)
+check("type with variant", m.type_score("PLA-CF", sp("x", "PLA", "CF", "", "")), 2)
+check("type base only", m.type_score("PLA-CF", spools[4]), 1)
+check("type different", m.type_score("ABS", spools[4]), 0)
+check("colour same", round(m.colour_distance("#000000", "#000000FF")), 0)
+check("colour unknown is far", m.colour_distance("", "#000000") > 700, True)
+
+H2C = "Bambu Lab H2C 0.4 nozzle"
+slots = [{"preset": "Bambu PETG Basic @BBL H2C", "color": "#000000", "type": "PETG"},
+         {"preset": "Bambu PETG Basic @BBL H2C", "color": "#FCE300", "type": "PETG"},
+         {"preset": "Bambu PLA Silk+ @BBL H2C", "color": "#0A8CDC", "type": "PLA"},
+         {"preset": "Bambu PETG Basic @BBL H2C", "color": "#000000", "type": "PETG"},
+         {"preset": "Generic ABS @BBL H2C", "color": "#FF0000", "type": "ABS"}]
+links, unmatched = m.link_slots(slots, [10.0, 2.5, 1.2, 3.0, 0.0], spools, H2C)
+check("auto exact colour", (links["1"]["code"], links["1"]["where"]), ("K2", "H2C A-2"))
+check("auto tie lists the other spool", links["1"]["alts"], ["A-3"])
+check("auto yellow", links["2"]["code"], "Y1")
+check("auto nearest colour", links["3"]["code"], "B5")
+check("second black slot gets the other black spool", links["4"]["code"], "K3")
+check("unused slot not linked", "5" in links, False)
+check("all used slots linked", unmatched, [])
+check("plan", m.links_plan([10.0, 2.5, 1.2, 3.0], links), {"K2": 10.0, "Y1": 2.5, "B5": 1.2, "K3": 3.0})
+links, unmatched = m.link_slots(slots, [1.0, 0, 0, 0, 4.0], spools, H2C, manual={"1": "MANUAL"})
+check("manual link wins", (links["1"]["code"], links["1"]["source"]), ("MANUAL", "manual"))
+check("no ABS in the AMS", [u["slot"] for u in unmatched], ["5"])
+check("empty spool skipped", m.link_slots([{"type": "PLA", "color": "#FFFFFF"}], [1.0], [spools[6]], H2C)[0], {})
+check("printer not in 3DFP", m.link_slots(slots, [1.0], spools, "Voron 2.4")[1][0]["slot"], "1")
+
 # --- embedded logo: a 64x64 PNG, and the panel HTML has the slot it goes into
 import base64, struct
 png = base64.b64decode(m.LOGO_PNG_B64)
@@ -192,6 +241,25 @@ check("data_dir from storage path", mo.data_dir(), store)
 cap.set_setting("printer", "P2S")
 check("settings persist", cap.settings()["printer"], "P2S")
 check("defaults kept", cap.settings()["save_preset"], True)
+check("auto-link on by default", cap.settings()["auto_link"], True)
+
+# the print-start path with a stub UI and API: auto-links, then offers to deduct
+notes = []
+orca.host.ui = types.SimpleNamespace(NotificationLevel=types.SimpleNamespace(RegularNotificationLevel=0, WarningNotificationLevel=1),
+                                     push_notification=lambda lvl, text, **kw: notes.append((lvl, text)))
+cap.set_setting("api_key", "3dfp_test")
+cap.spools = spools
+cap.job_spools = lambda: None  # no network
+cap.last_slice = {"grams": [10.0, 2.5], "slots": slots[:2], "printer_name": H2C, "printer_code": "H2C", "deducted": False}
+cap._print_started_job()
+check("offer names the spools", notes and "10.0 g from K2" in notes[-1][1] and "2.5 g from Y1" in notes[-1][1], True)
+check("plan kept for the click", cap.last_slice["plan"], {"K2": 10.0, "Y1": 2.5})
+log = open(os.path.join(storage, "events.log"), encoding="utf-8").read()
+check("events.log records the links", '"1": ["K2", "auto", "H2C A-2", "or A-3"]' in log, True)
+cap.last_slice = {"grams": [4.0], "slots": [slots[4]], "printer_name": H2C, "printer_code": "H2C", "deducted": False}
+notes.clear()
+cap._print_started_job()
+check("unmatched slot warns", notes and notes[0][0] == 1 and "slot 1" in notes[0][1], True)
 
 print("\npanel script written to", js_path)
 print("FAILURES:", fails)

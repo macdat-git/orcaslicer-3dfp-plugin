@@ -38,7 +38,22 @@ A **3DFP** panel docks on the right of the Prepare/Preview tabs:
 **Save preset** only does step 3.
 
 **Spool deduction:** after slicing, the grams per slot are read from the G-code. When a print starts, a notification
-offers to subtract them from the spools linked in **Slots** (or does it automatically if you turn that on). This uses a single API request.
+offers to subtract them from the slots' spools (or does it automatically if you turn that on). The deduction itself is one API request.
+
+Which spool a slot uses:
+1. The spool you picked for it in **Slots** (or set with **Use in slot** on a spool), if any.
+2. Otherwise (**Link slots to spools automatically**, on by default), the spool your 3DFP spool list places in the
+   selected printer's AMS. It must have the same filament type, and the closest colour wins. On a tie, the first AMS
+   position wins, and the other spool is shown as an alternative. The plugin re-reads your spools when the print starts
+   (one more request), so the 3DFP locations need to be current. A tool that syncs AMS slots to 3DFP locations keeps
+   them current, or you can set them on 3DFP by hand. 3DFP locations look like `Printer: H2C, AMS: A-1`, `Printer: H2C, AMS: HT-A-1` or
+   `Printer: P2S, External Spool`. The printer name (`H2C`) must appear in the OrcaSlicer printer preset name.
+3. A slot that used filament but gets no spool isn't deducted, and a warning notification says which slot and why.
+
+The plugin can't see the AMS mapping you confirm in the send dialog: the OrcaSlicer plugin API doesn't expose it. If you
+remap a slot to a different tray there, pick that spool in **Slots** before sending.
+
+Slices, print starts, the links chosen and each deduction are logged to `events.log` in the plugin's data folder.
 
 ## Install
 
