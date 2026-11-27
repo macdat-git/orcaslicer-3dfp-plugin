@@ -220,15 +220,30 @@ cslots = [{"type": "PETG", "color": "#000000"}, {"type": "PETG", "color": "#0000
 ck = m.slice_checks([10.0, 5.0, 1.0, 1.0], cslots, links, low, H2C, "H2C", margin=10)
 kinds = sorted((c["slot"], c["kind"]) for c in ck)
 check("checks found", kinds, [("1", "low"), ("2", "colour"), ("2", "stale"), ("2", "type"), ("4", "missing")])
-check("low names grams", [c["text"] for c in ck if c["kind"] == "low"], ["Slot 1 needs 10 g, spool K2 has 12 g"])
+check("low names grams", [c["text"] for c in ck if c["kind"] == "low"], ["Slot 1 (AMS: A-2) needs 10 g, spool K2 has 12 g"])
 check("multicolour spool: no colour warning", ("3", "colour") in kinds, False)
 check("manual link inside this printer isn't stale", ("3", "stale") in kinds, False)
 check("enough filament: no warning", m.slice_checks([1.0], cslots, {"1": links["1"]}, low, H2C, "H2C", 0), [])
 two = {"1": {"code": "Y1", "source": "auto"}, "2": {"code": "Y1", "source": "auto"}}
 check("one spool used by two slots is summed", [c["text"] for c in m.slice_checks(
-    [300.0, 250.0], [{"type": "PETG", "color": "#FCE300"}] * 2, two, low, H2C, "H2C", 10)], ["Slot 1 needs 550 g, spool Y1 has 500 g"])
+    [300.0, 250.0], [{"type": "PETG", "color": "#FCE300"}] * 2, two, low, H2C, "H2C", 10)], ["Slot 1 (AMS: A-1) needs 550 g, spool Y1 has 500 g"])
 check("printer not tracked: no stale warning", [c["kind"] for c in m.slice_checks(
     [1.0], [{"type": "PLA", "color": "#FFFFFF"}], {"1": links["2"]}, low, "Voron 2.4", "ANY", 0)], [])
+check("stale warning has no position", [c["text"] for c in ck if c["kind"] == "stale"][0].startswith("Slot 2 is linked"), True)
+
+# --- slot names: where each slot's spool is, named as in 3DFP
+check("location name AMS", m.location_name("Printer: H2C, AMS: A-1"), "AMS: A-1")
+check("location name HT", m.location_name("Printer: H2C, AMS: HT-A-1"), "AMS: HT-A-1")
+check("location name external", m.location_name("Printer: P2S, External Spool"), "External Spool")
+check("location name shelf", m.location_name("Shelf: Closet Shelf 3"), "")
+ps = m.slot_positions(slots, spools, H2C, "H2C", {"5": "S9"})
+check("positions from auto-link", {k: v["name"] for k, v in ps.items()},
+      {"1": "AMS: A-2", "2": "AMS: A-1", "3": "AMS: B-4", "4": "AMS: A-3"})
+check("tie shows the other position", ps["1"]["alts"], ["AMS: A-3"])
+check("manual link on a shelf has no position", "5" in ps, False)
+check("manual link in the printer", m.slot_positions(slots[:1], spools, H2C, "H2C", {"1": "A6"})["1"]["name"], "AMS: HT-A-1")
+check("auto-link off: only manual links", list(m.slot_positions(slots, spools, H2C, "H2C", {"2": "G4"}, auto=False)), ["2"])
+check("printer not in 3DFP: no positions", m.slot_positions(slots, spools, "Voron 2.4"), {})
 
 # --- Load my AMS: this printer's spools in AMS order onto the filament slots
 pr, plan, left = m.ams_load_plan(spools, H2C, "H2C", 4)
@@ -385,7 +400,7 @@ cap.set_setting("slot_spools", {"1": "K3"})  # relinked in Slots after the slice
 cap.push_state()
 st_msg = next(p for p in posted if p["type"] == "state")
 check("state carries the checks and settings", ([c["text"] for c in st_msg["last_slice"]["checks"]],
-                                                st_msg["settings"]["low_stock_g"]), (["Slot 1 needs 600 g, spool K3 has 500 g"], 150))
+                                                st_msg["settings"]["low_stock_g"]), (["Slot 1 (AMS: A-3) needs 600 g, spool K3 has 500 g"], 150))
 check("state carries the quota", [p["remaining"] for p in posted if p["type"] == "quota"], [90])
 cap.set_setting("slice_checks", False)
 cap.push_state()

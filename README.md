@@ -57,6 +57,12 @@ Which spool a slot uses:
 The plugin can't see the AMS mapping you confirm in the send dialog: the OrcaSlicer plugin API doesn't expose it. If you
 remap a slot to a different tray there, pick that spool in **Slots** before sending.
 
+**Slot names:** OrcaSlicer numbers its filament slots 1, 2, 3…, which don't say where the spool is. The panel adds the position,
+named as in your 3DFP locations, so `Slot 1 (AMS: A-2)` is the spool in AMS A-2. For a slot you linked by hand it's that spool's
+position; otherwise it's the spool auto-link would pick for the slot (marked *auto*, and with *or* when two spools match
+equally). A slot whose spool isn't in this printer has no position. The Slots list, the **Use in slot** picker, *Last slice*
+and the slice-check warnings all use these names.
+
 **Slice checks** (on by default, **Check each slice against your spools** in Settings): after each slice, the plugin looks at the
 spool each used slot would be deducted from and warns, in a notification and under *Last slice* in Slots, when:
 - the spool doesn't have enough filament for the print plus a spare margin (**Spare filament**, 10 g by default). A spool used by

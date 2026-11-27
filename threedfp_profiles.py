@@ -526,6 +526,38 @@ def _hexes(rgb):
     return re.findall(r"#[0-9A-Fa-f]{6}", rgb or "")
 
 
+def location_name(location):
+    """'Printer: H2C, AMS: A-1' -> 'AMS: A-1': the position as 3DFP names it, without the printer."""
+    m = LOCATION_RE.match(location or "")
+    return m.group("where") if m else ""
+
+
+def slot_positions(slots, spools, printer_name, code="", manual=None, auto=True):
+    """Where each OrcaSlicer filament slot's spool is in the printer, named as in 3DFP ('AMS: A-1').
+    A slot linked by hand shows its spool's position; any other slot (with auto-link on) the spool auto-link would
+    pick for it. -> {"1": {"name": "AMS: A-1", "code": "K2", "source": "auto", "alts": ["AMS: A-3"]}}; a slot whose
+    spool isn't in this printer is left out."""
+    printer, here = printer_spools(spools, printer_name, code)
+    if not printer or not slots:
+        return {}
+    names = {label: location_name(sp.get("location")) for label, _key, sp in here}
+    grams = [1.0] * len(slots)
+    if auto:
+        links, _ = link_slots(slots, grams, spools, printer_name, code, manual)
+    else:
+        links, _ = link_slots([], grams, [], "", "", manual)
+    by_code = {sp.get("short_code"): sp for sp in spools or []}
+    out = {}
+    for k, ln in links.items():
+        sp = by_code.get(ln["code"])
+        pos = spool_position((sp or {}).get("location"))
+        if not pos or pos[0] != printer:
+            continue
+        out[k] = {"name": location_name(sp.get("location")), "code": ln["code"], "source": ln["source"],
+                  "alts": [names.get(a, a) for a in ln.get("alts") or []]}
+    return out
+
+
 def slice_checks(grams, slots, links, spools, printer_name, code="", margin=10):
     """Warnings for a slice: [{"slot", "kind", "text"}], kind low / type / colour / stale / missing.
     grams and slots: per filament slot (slot 1 first); links: from link_slots; margin: grams to keep spare."""
@@ -538,23 +570,24 @@ def slice_checks(grams, slots, links, spools, printer_name, code="", margin=10):
         c = ln["code"]
         sl = slots[int(k) - 1] if int(k) <= len(slots) else {}
         sp = by_code.get(c)
+        pos = spool_position((sp or {}).get("location"))
+        name = "Slot %s (%s)" % (k, location_name(sp.get("location"))) if pos and printer and pos[0] == printer else "Slot %s" % k
         if sp is None:
-            out.append({"slot": k, "kind": "missing", "text": "Slot %s: spool %s isn't in your 3DFP spools (press Refresh in Spools)" % (k, c)})
+            out.append({"slot": k, "kind": "missing", "text": "%s: spool %s isn't in your 3DFP spools (press Refresh in Spools)" % (name, c)})
             continue
         have = sp.get("remaining_grams") or 0
         if c not in low_done and have < need.get(c, 0) + margin:
             low_done.add(c)
-            out.append({"slot": k, "kind": "low", "text": "Slot %s needs %.0f g, spool %s has %s g" % (
-                k, need.get(c, 0), c, have)})
+            out.append({"slot": k, "kind": "low", "text": "%s needs %.0f g, spool %s has %s g" % (
+                name, need.get(c, 0), c, have)})
         if sl.get("type") and sp.get("material") and type_score(sl.get("type"), sp) == 0:
-            out.append({"slot": k, "kind": "type", "text": "Slot %s is %s, spool %s is %s" % (
-                k, sl.get("type"), c, " ".join(x for x in (sp.get("material"), sp.get("material_type")) if x))})
+            out.append({"slot": k, "kind": "type", "text": "%s is %s, spool %s is %s" % (
+                name, sl.get("type"), c, " ".join(x for x in (sp.get("material"), sp.get("material_type")) if x))})
         if len(_hexes(sp.get("rgb"))) == 1 and first_hex(sl.get("color")) \
                 and colour_distance(sl.get("color"), sp.get("rgb")) > COLOUR_WARN:
-            out.append({"slot": k, "kind": "colour", "text": "Slot %s colour %s doesn't look like spool %s (%s %s)" % (
-                k, first_hex(sl.get("color")), c, sp.get("color") or "", first_hex(sp.get("rgb")))})
+            out.append({"slot": k, "kind": "colour", "text": "%s colour %s doesn't look like spool %s (%s %s)" % (
+                name, first_hex(sl.get("color")), c, sp.get("color") or "", first_hex(sp.get("rgb")))})
         if ln.get("source") == "manual" and printer:
-            pos = spool_position(sp.get("location"))
             if not pos or pos[0] != printer:
                 out.append({"slot": k, "kind": "stale", "text": "Slot %s is linked to %s, which 3DFP has at “%s”, not in %s" % (
                     k, c, sp.get("location") or "Shelf", printer)})
@@ -861,7 +894,9 @@ document.querySelectorAll('[data-goto]').forEach(a=>a.onclick=()=>tab(a.dataset.
 function sw(rgb){const c=String(rgb||'').match(/#[0-9a-f]{6}/ig)||[];let bg='repeating-linear-gradient(45deg,#ccc 0 3px,#fff 3px 6px)';
  if(c.length===1)bg=c[0];else if(c.length>1){const s=100/c.length;bg='conic-gradient('+c.map((x,i)=>x+' '+(i*s)+'% '+((i+1)*s)+'%').join(',')+')'}
  return '<span class="sw" style="background:'+bg+'"></span>'}
-function slotOptions(){const n=Math.max(1,S.slots.length);let h='';for(let i=1;i<=n;i++){const s=S.slots[i-1];h+='<option value="'+i+'">Slot '+i+(s?' \u2013 '+esc(s.preset).slice(0,28):'')+'</option>'}return h}
+function pos(i){return (S.slot_pos||{})[String(i)]}
+function slotName(i){const p=pos(i);return 'Slot '+i+(p?' ('+esc(p.name)+')':'')}
+function slotOptions(){const n=Math.max(1,S.slots.length);let h='';for(let i=1;i<=n;i++){const s=S.slots[i-1];h+='<option value="'+i+'">'+slotName(i)+(s?' \u2013 '+esc(s.preset).slice(0,28):'')+'</option>'}return h}
 function actions(kind,id,url){return '<div class="actions"><select class="slot-pick">'+slotOptions()+'</select>'+
  '<button class="btn" data-act="use" data-kind="'+kind+'" data-id="'+esc(id)+'">Use in slot</button>'+
  '<button class="btn ghost" data-act="save" data-kind="'+kind+'" data-id="'+esc(id)+'" title="Only write the user preset file">Save preset</button>'+
@@ -916,9 +951,11 @@ $('stot').onclick=()=>{const b=$('totals');b.style.display=b.style.display==='no
 function renderSlots(){const box=$('slotlist');if(!S.slots.length){box.innerHTML='<div class="meta">No filament slots (open the Prepare tab).</div>';return}
  const opts=c=>'<option value="">\u2014 '+((S.settings||{}).auto_link?'auto':'no spool')+' \u2014</option>'+SPOOLS.filter(s=>s.remaining_grams>0||s.short_code===c).map(s=>'<option value="'+esc(s.short_code)+'"'+(s.short_code===c?' selected':'')+'>'+esc(s.short_code)+' \u00b7 '+spoolLabel(s)+' ('+esc(s.remaining_grams)+' g)</option>').join('')+
   (c&&!SPOOLS.some(s=>s.short_code===c)?'<option value="'+esc(c)+'" selected>'+esc(c)+'</option>':'');
- box.innerHTML=S.slots.map((s,i)=>{const c=S.slot_spools[String(i+1)]||'';return '<div class="slot">'+sw(s.color)+'<div class="meta" title="'+esc(s.preset)+'">Slot '+(i+1)+': '+esc(s.preset)+'</div><span></span><select data-slot="'+(i+1)+'">'+opts(c)+'</select></div>'}).join('');
+ box.innerHTML=S.slots.map((s,i)=>{const c=S.slot_spools[String(i+1)]||'',p=pos(i+1);
+  const where=p?'<b>'+esc(p.name)+'</b>'+(p.alts&&p.alts.length?' or '+esc(p.alts.join(' / ')):'')+(p.source==='auto'?' <span title="The spool auto-link picks for this slot: same material, closest colour">(auto)</span>':'')+' \u00b7 ':'';
+  return '<div class="slot">'+sw(s.color)+'<div class="meta" title="'+esc((p?p.name+' \u00b7 ':'')+'Slot '+(i+1)+': '+s.preset)+'">'+where+'Slot '+(i+1)+': '+esc(s.preset)+'</div><span></span><select data-slot="'+(i+1)+'">'+opts(c)+'</select></div>'}).join('');
  box.querySelectorAll('select').forEach(el=>el.onchange=()=>post({type:'map',slot:+el.dataset.slot,code:el.value}));
- const ls=S.last_slice;if(ls&&ls.grams&&ls.grams.length){const L=ls.links||ls.preview||{};$('slice').innerHTML=ls.grams.map((g,i)=>{const l=L[String(i+1)];return 'Slot '+(i+1)+': <b>'+g.toFixed(2)+' g</b>'+(l?' \u2192 '+esc(l.code)+(l.source==='auto'?' <span>(auto, '+esc(l.where)+(l.alts&&l.alts.length?', or '+esc(l.alts.join('/')):'')+')</span>':''):(g>0.005?' \u2192 <span>no spool</span>':''))}).join('<br>')+
+ const ls=S.last_slice;if(ls&&ls.grams&&ls.grams.length){const L=ls.links||ls.preview||{};$('slice').innerHTML=ls.grams.map((g,i)=>{const l=L[String(i+1)];return slotName(i+1)+': <b>'+g.toFixed(2)+' g</b>'+(l?' \u2192 '+esc(l.code)+(l.source==='auto'?' <span>(auto'+(pos(i+1)?'':', '+esc(l.where))+(l.alts&&l.alts.length?', or '+esc(l.alts.join('/')):'')+')</span>':''):(g>0.005?' \u2192 <span>no spool</span>':''))}).join('<br>')+
   '<br><span>'+esc(ls.when||'')+(ls.deducted?' \u00b7 already deducted':'')+'</span>';$('deduct').disabled=!S.plan_ok||ls.deducted;
   const ck=ls.checks||[];$('checks').innerHTML=ck.length?'<div class="chk"><b>Check before printing</b>'+ck.map(c=>'<div>'+esc(c.text)+'</div>').join('')+'</div>':'';}
  else{$('slice').textContent='Slice a plate to see the grams per slot.';$('deduct').disabled=true;$('checks').innerHTML=''}
@@ -1318,6 +1355,8 @@ if orca is not None:
             self.post({
                 "type": "state", "printer_name": st["printer_name"], "printer_code": st["printer_code"],
                 "nozzle": st["nozzle"], "slots": st["slots"], "slot_spools": slot_spools,
+                "slot_pos": slot_positions(st["slots"], self.spools, st["printer_name"], st["printer_code"], slot_spools,
+                                           s.get("auto_link", True)),
                 "settings": {k: s[k] for k in ("printer", "nozzle", "pressure_advance", "save_preset", "set_color",
                                                "offer_deduct", "auto_deduct", "auto_link", "auto_open", "ams_add_spools",
                                                "slice_checks", "low_margin_g", "low_stock_g")},
@@ -1919,21 +1958,21 @@ if orca is not None:
                 except ApiError as e:
                     ok, title, ln, mo = False, e.friendly(), [], []
                 if ok:
-                    lines.append("Slot %d: %s %s (%s)" % (slot, label, self._desc(code), code))
+                    lines.append("Slot %d: %s, %s (%s)" % (slot, location_name(sp.get("location")) or label, self._desc(code), code))
                     if s.get("auto_link", True):
                         links.pop(str(slot), None)  # auto-link finds it from its location; a manual link would go stale
                     else:
                         links[str(slot)] = code
                 else:
                     failed += 1
-                    lines.append("Slot %d: %s %s not loaded: %s" % (slot, label, code, title))
+                    lines.append("Slot %d: %s, %s not loaded: %s" % (slot, location_name(sp.get("location")) or label, code, title))
                 more += ["slot %d: %s" % (slot, x) for x in ln[1:] + mo]
             self.set_setting("slot_spools", links)
             if left:
                 lines.append("OrcaSlicer has %d filament slots and %s has %d spools: add %d filament%s in OrcaSlicer's "
                              "list, then press Load my AMS again for %s." % (
                                  len(st["slots"]), printer, len(plan) + len(left), len(left), "" if len(left) == 1 else "s",
-                                 ", ".join(label for label, _sp in left)))
+                                 ", ".join(location_name(_sp.get("location")) or label for label, _sp in left)))
             elif len(plan) < len(st["slots"]):
                 lines.append("Slot%s %s left as %s." % ("s" if len(st["slots"]) - len(plan) > 1 else "",
                                                         ", ".join(str(i) for i in range(len(plan) + 1, len(st["slots"]) + 1)),

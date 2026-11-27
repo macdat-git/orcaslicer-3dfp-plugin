@@ -34,6 +34,10 @@ again, e.g. after linking the right spool. Deductions logged by earlier versions
 **API quota.** Settings shows the requests left this month and when that was last seen, also after a restart. You get one
 warning a month when fewer than 100 are left. The quota is per account, so it includes other tools that use your key.
 
+**Slot names.** Slots are shown with their position as named in your 3DFP locations, e.g. `Slot 1 (AMS: A-2)` or
+`Slot 3 (AMS: HT-A-1)`, in the Slots list, the **Use in slot** picker, *Last slice* and the slice-check warnings. The position
+comes from the spool linked to the slot, or the one auto-link would pick (marked *auto*).
+
 **Description.** The plugin description and README now say that the 3DFP API is a paid subscription add-on.
 
 ## 1.1.2 (2026-11-26)
