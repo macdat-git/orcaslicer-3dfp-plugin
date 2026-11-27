@@ -6,18 +6,22 @@
 # name = "3D Filament Profiles"
 # description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, and deduct what a print used from your 3DFP spools. Needs a 3DFP API key (subscription or Patreon)."
 # author = "Andy Mackey"
-# version = "1.1.2"
+# version = "1.2.0"
 # ///
 """OrcaSlicer 2.5 plugin for the 3D Filament Profiles API (https://3dfilamentprofiles.com/docs/api).
 
 What it does, from a panel docked beside the 3D view:
   * Find      search the 3DFP filament catalog (brand / material / colour / hex).
-  * My spools list the spools in your 3DFP account.
+  * Spools    list the spools in your 3DFP account, with a low stock filter, totals per material and
+    Mark empty.
   * For either, "Use in slot N" fetches 3DFP's OrcaSlicer preset for your printer + nozzle, puts its
     values on the matching system preset in that filament slot (shows as an unsaved edit), and saves
     it as a user preset file so it is in the filament list from the next start.
   * Slots     link each filament slot to a 3DFP spool; after a print starts (or on demand) the grams
-    the slice used are deducted from those spools in one API request.
+    the slice used are deducted from those spools in one API request. Each slice is checked first: a
+    spool short of filament, a type or colour that doesn't match the slot, a manual link to a spool
+    3DFP has elsewhere. "Load my AMS" sets every slot from the spools 3DFP has in this printer's AMS.
+  * History   every deduction and spool marked empty, each with Undo (puts the grams back).
 
 The API client and helpers at the top have no dependency on the `orca` module, so they can be tested
 with any Python 3.12 (see the __main__ block at the bottom).
@@ -32,7 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PLUGIN_VERSION = "1.1.2"
+PLUGIN_VERSION = "1.2.0"
 SITE = "https://3dfilamentprofiles.com"
 API_BASE = SITE + "/api/v1"
 USER_AGENT = "OrcaSlicer-3DFP-Plugin/" + PLUGIN_VERSION
@@ -139,10 +143,14 @@ class Client:
 
     def deduct(self, used):
         """used: {short_code: grams}. One request for up to 50 spools."""
-        body = [{"short_code": c, "used_grams": round(float(g), 2)} for c, g in used.items() if g and g > 0]
-        if not body:
+        return self.update([{"short_code": c, "used_grams": round(float(g), 2)} for c, g in used.items() if g and g > 0])
+
+    def update(self, items):
+        """Batch PATCH: each item is short_code plus one of remaining_grams / used_grams, and optionally location.
+        A spool set to 0 g goes to the account's Empty location, as on the website."""
+        if not items:
             return {"data": []}
-        return self.request("PATCH", "/my/spools", body=body[:50])
+        return self.request("PATCH", "/my/spools", body=list(items)[:50])
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +518,99 @@ def links_plan(grams, links):
     return deduct_plan(grams, {k: v["code"] for k, v in (links or {}).items()})
 
 
+# --- checks on a slice, before it's printed: enough filament, the right spool, a link that isn't stale
+COLOUR_WARN = 180  # redmean distance: black vs #333333 is about 150, red vs orange about 255
+
+
+def _hexes(rgb):
+    return re.findall(r"#[0-9A-Fa-f]{6}", rgb or "")
+
+
+def slice_checks(grams, slots, links, spools, printer_name, code="", margin=10):
+    """Warnings for a slice: [{"slot", "kind", "text"}], kind low / type / colour / stale / missing.
+    grams and slots: per filament slot (slot 1 first); links: from link_slots; margin: grams to keep spare."""
+    by_code = {sp.get("short_code"): sp for sp in spools or []}
+    need = links_plan(grams, links)
+    printer, here = printer_spools(spools, printer_name, code)
+    out, low_done = [], set()
+    for k in sorted(links, key=int):
+        ln = links[k]
+        c = ln["code"]
+        sl = slots[int(k) - 1] if int(k) <= len(slots) else {}
+        sp = by_code.get(c)
+        if sp is None:
+            out.append({"slot": k, "kind": "missing", "text": "Slot %s: spool %s isn't in your 3DFP spools (press Refresh in Spools)" % (k, c)})
+            continue
+        have = sp.get("remaining_grams") or 0
+        if c not in low_done and have < need.get(c, 0) + margin:
+            low_done.add(c)
+            out.append({"slot": k, "kind": "low", "text": "Slot %s needs %.0f g, spool %s has %s g" % (
+                k, need.get(c, 0), c, have)})
+        if sl.get("type") and sp.get("material") and type_score(sl.get("type"), sp) == 0:
+            out.append({"slot": k, "kind": "type", "text": "Slot %s is %s, spool %s is %s" % (
+                k, sl.get("type"), c, " ".join(x for x in (sp.get("material"), sp.get("material_type")) if x))})
+        if len(_hexes(sp.get("rgb"))) == 1 and first_hex(sl.get("color")) \
+                and colour_distance(sl.get("color"), sp.get("rgb")) > COLOUR_WARN:
+            out.append({"slot": k, "kind": "colour", "text": "Slot %s colour %s doesn't look like spool %s (%s %s)" % (
+                k, first_hex(sl.get("color")), c, sp.get("color") or "", first_hex(sp.get("rgb")))})
+        if ln.get("source") == "manual" and printer:
+            pos = spool_position(sp.get("location"))
+            if not pos or pos[0] != printer:
+                out.append({"slot": k, "kind": "stale", "text": "Slot %s is linked to %s, which 3DFP has at “%s”, not in %s" % (
+                    k, c, sp.get("location") or "Shelf", printer)})
+    return out
+
+
+def ams_load_plan(spools, printer_name, code, nslots):
+    """Load my AMS: the spools 3DFP has in this printer, in AMS order, onto Orca's filament slots 1..nslots.
+    -> (printer, [(slot, label, spool)], left_over [(label, spool)])."""
+    printer, here = printer_spools(spools, printer_name, code)
+    rows = [(label, sp) for label, _key, sp in here]
+    plan = [(i, label, sp) for i, (label, sp) in enumerate(rows[:max(0, nslots)], 1)]
+    return printer, plan, rows[max(0, nslots):]
+
+
+_LOG_DEDUCT = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) deduct \((button|print start)\): (.*)$")
+_LOG_ITEM = re.compile(r"^(\S+)(?: \((.*)\))?: \u2212([\d.]+) g, (-?[\d.]+) g left$")
+
+
+def history_from_log(text):
+    """History entries rebuilt from the deductions events.log recorded before history.json existed."""
+    out = []
+    for line in (text or "").splitlines():
+        m = _LOG_DEDUCT.match(line.strip())
+        if not m:
+            continue
+        items = []
+        for part in m.group(3).split("; "):
+            it = _LOG_ITEM.match(part.strip())
+            if it:
+                items.append({"code": it.group(1), "name": it.group(2) or "", "grams": float(it.group(3)),
+                              "after": float(it.group(4))})
+        if items:
+            out.append({"id": "log-%d" % len(out), "when": m.group(1), "kind": "deduct",
+                        "source": m.group(2), "items": items, "imported": True})
+    return out
+
+
+def undo_items(entry, current):
+    """The PATCH items that put back what a history entry took off. current: {short_code: spool} as 3DFP has it now.
+    -> (items, problems)."""
+    items, problems = [], []
+    for it in entry.get("items") or []:
+        sp = current.get(it["code"])
+        if sp is None:
+            problems.append("%s: no longer in your 3DFP spools" % it["code"])
+            continue
+        target = int(round((sp.get("remaining_grams") or 0) + float(it.get("grams") or 0)))
+        body = {"short_code": it["code"], "remaining_grams": max(0, min(10000, target))}
+        loc, before = (sp.get("location") or ""), (it.get("location") or "")
+        if loc.strip().lower() == "empty" and before and before.strip().lower() != "empty":
+            body["location"] = before  # emptying moved it to Empty: put it back where it was
+        items.append(body)
+    return items, problems
+
+
 # ---------------------------------------------------------------------------
 # docked panel
 # ---------------------------------------------------------------------------
@@ -685,10 +786,15 @@ footer{display:flex;gap:8px;align-items:center;border-top:1px solid var(--border
 .spin{width:11px;height:11px;border-radius:50%;border:2px solid var(--border);border-top-color:var(--accent);animation:r .8s linear infinite;display:none}
 .busy .spin{display:inline-block}@keyframes r{to{transform:rotate(1turn)}}
 a{color:var(--accent);cursor:pointer;text-decoration:none}
+.chk{margin-top:6px;border-radius:6px;padding:5px 8px;background:color-mix(in srgb,#e0a100 14%,var(--bg));font-size:11.5px}
+.chk div{margin:1px 0;overflow-wrap:anywhere}
+.tag.low{background:var(--err-soft);color:var(--err)}
+.tot{display:grid;grid-template-columns:1fr auto auto;gap:1px 10px;font-size:11.5px}.tot .n{color:var(--muted);text-align:right}
+.hl{margin:2px 0 0;padding-left:16px;font-size:11.5px}.hl li{overflow-wrap:anywhere}
 .keywarn{border:1px solid var(--warn);background:color-mix(in srgb,#e0a100 12%,var(--bg));border-radius:8px;padding:8px 10px;margin-bottom:10px}
 </style></head><body>
 <header><img class="logo" src="data:image/png;base64,__LOGO__" alt=""><div><div class="title">3D Filament Profiles</div><div class="sub" id="printer">-</div></div></header>
-<nav><button data-tab="find" class="on">Find</button><button data-tab="spools">My spools</button><button data-tab="slots">Slots</button><button data-tab="settings">Settings</button></nav>
+<nav><button data-tab="find" class="on">Find</button><button data-tab="spools">Spools</button><button data-tab="slots">Slots</button><button data-tab="history">History</button><button data-tab="settings">Settings</button></nav>
 <main>
 <div id="nokey" class="keywarn" style="display:none">Add your 3DFP API key in <a data-goto="settings">Settings</a> first. Get it from the API access page in the user menu on 3dfilamentprofiles.com.</div>
 <section id="find" class="on">
@@ -700,14 +806,24 @@ a{color:var(--accent);cursor:pointer;text-decoration:none}
 </section>
 <section id="spools">
   <div class="row"><input id="sq" class="grow" placeholder="Filter spools"><button class="btn ghost" id="sref">Refresh</button></div>
-  <div class="row" style="margin-top:6px"><label class="row"><input type="checkbox" id="sempty"> show empty</label></div>
+  <div class="row" style="margin-top:6px;gap:12px"><label class="row"><input type="checkbox" id="sempty"> show empty</label>
+  <label class="row"><input type="checkbox" id="slow"> <span id="slowlbl">low stock</span></label><span class="grow"></span><a id="stot">Totals</a></div>
+  <div id="totals" class="card" style="display:none;margin:8px 0 0"></div>
   <div id="slist" class="list"><div class="empty">Press Refresh to load your spools from 3DFP.</div></div>
 </section>
 <section id="slots">
   <div class="card"><div class="label">Spool in each filament slot</div><div id="slotlist"></div>
-  <div class="row" style="margin-top:8px"><button class="btn ghost" id="slref">Refresh slots</button></div></div>
+  <div class="row" style="margin-top:8px"><button class="btn ghost" id="slref">Refresh slots</button>
+  <button class="btn ghost" id="loadams" title="Set every filament slot from the spools 3DFP has in this printer's AMS, in AMS order">Load my AMS</button></div></div>
   <div class="card"><div class="label">Last slice</div><div id="slice" class="meta" style="white-space:normal">Slice a plate to see the grams per slot.</div>
-  <div class="row" style="margin-top:8px"><button class="btn" id="deduct" disabled>Deduct from 3DFP spools</button></div></div>
+  <div id="checks"></div>
+  <div class="row" style="margin-top:8px"><button class="btn" id="deduct" disabled>Deduct from 3DFP spools</button>
+  <button class="btn ghost" id="undo" style="display:none">Undo last deduction</button></div>
+  <div id="undoinfo" class="meta" style="white-space:normal;margin-top:4px"></div></div>
+</section>
+<section id="history">
+  <div class="row"><span class="grow meta" id="hinfo">Deductions, spools marked empty and undos.</span><button class="btn ghost" id="href">Refresh</button></div>
+  <div id="hlist" class="list"><div class="empty">Nothing yet.</div></div>
 </section>
 <section id="settings">
   <div class="field"><div class="t">API key</div><div class="d" id="keyinfo">Starts with 3dfp_. Stored in this plugin's data folder.</div>
@@ -721,7 +837,11 @@ a{color:var(--accent);cursor:pointer;text-decoration:none}
   <label class="check"><input type="checkbox" id="s_auto"><span><b>Deduct without asking</b> when a print starts</span></label>
   <label class="check"><input type="checkbox" id="s_link"><span><b>Link slots to spools automatically</b><br><span class="meta" style="white-space:normal">A slot with no spool picked in Slots uses the spool 3DFP has in this printer's AMS with the same type and closest colour (keep 3DFP locations current, e.g. with 3DFP AMS Sync: github.com/macdat-git/3dfp-ams-sync).</span></span></label>
   <div id="amsbox" style="display:none"><label class="check"><input type="checkbox" id="s_amsadd"><span><b>Add new RFID spools to 3DFP</b><br><span class="meta" style="white-space:normal">For the 3DFP AMS Sync service on this PC: a Bambu RFID spool that isn't in 3DFP yet is added to your spools and placed in its AMS slot.</span></span></label></div>
+  <label class="check"><input type="checkbox" id="s_check"><span><b>Check each slice against your spools</b><br><span class="meta" style="white-space:normal">Warns before you print if a slot's spool is short of filament, its type or colour doesn't match the slot, or a slot you linked by hand has a spool 3DFP has somewhere else.</span></span></label>
+  <div class="field"><div class="t">Spare filament (g)</div><div class="d">Warn when a spool would have less than this left after the print.</div><input type="number" id="s_margin" min="0" max="1000" step="1"></div>
+  <div class="field"><div class="t">Low stock below (g)</div><div class="d">For the low stock filter and totals in Spools.</div><input type="number" id="s_lowstock" min="0" max="10000" step="10"></div>
   <label class="check"><input type="checkbox" id="s_open"><span><b>Open this panel</b> when OrcaSlicer opens a project</span></label>
+  <div class="field"><div class="t">API requests</div><div class="d" id="quotainfo">Not known yet: shown after the first request.</div></div>
 </section>
 <div id="out"></div>
 </main>
@@ -730,9 +850,12 @@ a{color:var(--accent);cursor:pointer;text-decoration:none}
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const post=o=>window.orca&&orca.postMessage(o);
-let S={slots:[],slot_spools:{},settings:{}},RES=null,PAGE=1,OPEN=null,SPOOLS=[],DET={};
+let S={slots:[],slot_spools:{},settings:{}},RES=null,PAGE=1,OPEN=null,SPOOLS=[],DET={},HIST=null,Q=null;
 function tab(t){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));
- document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id===t));$('out').innerHTML='';}
+ document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id===t));$('out').innerHTML='';
+ if(t==='history')post({type:'history'});}
+function arm(b,label,fire){if(b.dataset.armed){fire();return}const old=b.textContent;b.dataset.armed='1';b.textContent=label;
+ setTimeout(()=>{if(b.isConnected){delete b.dataset.armed;b.textContent=old}},4000)}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
 document.querySelectorAll('[data-goto]').forEach(a=>a.onclick=()=>tab(a.dataset.goto));
 function sw(rgb){const c=String(rgb||'').match(/#[0-9a-f]{6}/ig)||[];let bg='repeating-linear-gradient(45deg,#ccc 0 3px,#fff 3px 6px)';
@@ -742,9 +865,11 @@ function slotOptions(){const n=Math.max(1,S.slots.length);let h='';for(let i=1;i
 function actions(kind,id,url){return '<div class="actions"><select class="slot-pick">'+slotOptions()+'</select>'+
  '<button class="btn" data-act="use" data-kind="'+kind+'" data-id="'+esc(id)+'">Use in slot</button>'+
  '<button class="btn ghost" data-act="save" data-kind="'+kind+'" data-id="'+esc(id)+'" title="Only write the user preset file">Save preset</button>'+
+ (kind==='spool'?'<button class="btn ghost" data-empty="'+esc(id)+'" title="Set this spool to 0 g on 3DFP (it moves to your Empty location)">Mark empty</button>':'')+
  (url?'<a data-url="'+esc(url)+'">Open on 3DFP</a>':'')+'</div>'}
 function wireActions(root){root.querySelectorAll('[data-act]').forEach(b=>b.onclick=e=>{e.stopPropagation();
   const pick=b.parentElement.querySelector('.slot-pick');post({type:b.dataset.act,kind:b.dataset.kind,id:b.dataset.id,slot:+(pick?pick.value:1)})});
+ root.querySelectorAll('[data-empty]').forEach(b=>b.onclick=e=>{e.stopPropagation();arm(b,'Set to 0 g?',()=>post({type:'empty',code:b.dataset.empty}))});
  root.querySelectorAll('[data-url]').forEach(a=>a.onclick=e=>{e.stopPropagation();post({type:'open_url',url:a.dataset.url})});}
 function t(v,u){return v==null||v===''?'\u2013':esc(v)+(u||'')}
 function range(a,b,u){if(a==null&&b==null)return '\u2013';if(a==null)return esc(b)+u;if(b==null||a==b)return esc(a)+u;return esc(a)+'\u2013'+esc(b)+u}
@@ -767,31 +892,61 @@ function search(p){PAGE=p||1;OPEN=null;post({type:'search',q:$('q').value.trim()
 $('go').onclick=()=>search(1);$('q').onkeydown=e=>{if(e.key==='Enter')search(1)};$('mat').onchange=()=>search(1);
 $('prev').onclick=()=>search(PAGE-1);$('next').onclick=()=>search(PAGE+1);
 function spoolLabel(s){return esc(s.brand)+' '+esc(s.material)+(s.material_type?' '+esc(s.material_type):'')+' \u2013 '+esc(s.color)}
-function renderSpools(){const box=$('slist');const f=$('sq').value.trim().toLowerCase();
- let rows=SPOOLS.filter(s=>($('sempty').checked||s.remaining_grams>0)&&(!f||[s.short_code,s.brand,s.material,s.material_type,s.color,s.location,s.rgb].join(' ').toLowerCase().includes(f)));
+function lowG(){const v=+((S.settings||{}).low_stock_g);return isFinite(v)?v:150}
+function renderTotals(){const box=$('totals');if(box.style.display==='none')return;const g={},L=lowG();
+ SPOOLS.filter(s=>s.remaining_grams>0).forEach(s=>{const k=[s.material,s.material_type].filter(x=>x).join(' ')||'?';const e=g[k]||(g[k]={n:0,t:0,c:{}});e.n++;e.t+=+s.remaining_grams||0;
+  const c=s.color||'?';e.c[c]=(e.c[c]||0)+(+s.remaining_grams||0)});
+ const keys=Object.keys(g).sort((a,b)=>g[a].t-g[b].t);if(!keys.length){box.innerHTML='<div class="meta">No spools with filament left.</div>';return}
+ box.innerHTML='<div class="label">Filament left by material</div><div class="tot">'+keys.map(k=>{const e=g[k];
+  return '<div title="'+esc(Object.entries(e.c).sort((a,b)=>b[1]-a[1]).map(([c,t])=>c+': '+Math.round(t)+' g').join('\n'))+'">'+esc(k)+(e.t<L?' <span class="tag low">low</span>':'')+'</div><div class="n">'+e.n+' spool'+(e.n==1?'':'s')+'</div><div><b>'+(e.t>=1000?(e.t/1000).toFixed(1)+' kg':Math.round(e.t)+' g')+'</b></div>'}).join('')+'</div>'}
+function renderSpools(){const box=$('slist');const f=$('sq').value.trim().toLowerCase();const L=lowG();
+ $('slowlbl').textContent='low stock (< '+L+' g)';
+ let rows=SPOOLS.filter(s=>($('sempty').checked||s.remaining_grams>0)&&(!$('slow').checked||s.remaining_grams<L)&&(!f||[s.short_code,s.brand,s.material,s.material_type,s.color,s.location,s.rgb].join(' ').toLowerCase().includes(f)));
+ if($('slow').checked)rows.sort((a,b)=>(a.remaining_grams||0)-(b.remaining_grams||0));
+ renderTotals();
  if(!SPOOLS.length){box.innerHTML='<div class="empty">No spools loaded. Press Refresh.</div>';return}
  if(!rows.length){box.innerHTML='<div class="empty">No spools match.</div>';return}
  box.innerHTML=rows.map(s=>{const open=OPEN==='s'+s.short_code;return '<div class="item'+(open?' open':'')+'" data-code="'+esc(s.short_code)+'"><div class="head">'+sw(s.rgb)+
-  '<div class="grow"><div class="name">'+spoolLabel(s)+'</div><div class="meta">'+esc(s.short_code)+' \u00b7 '+esc(s.remaining_grams)+' g'+(s.location?' \u00b7 '+esc(s.location):'')+'</div></div></div>'+
+  '<div class="grow"><div class="name">'+spoolLabel(s)+'</div><div class="meta">'+esc(s.short_code)+' \u00b7 '+esc(s.remaining_grams)+' g'+(s.location?' \u00b7 '+esc(s.location):'')+'</div></div>'+
+  (s.remaining_grams>0&&s.remaining_grams<L?'<span class="tag low">low</span>':'')+'</div>'+
   (open?'<div class="det">'+(s.notes?'<div class="meta" style="white-space:normal;margin-bottom:6px">'+esc(s.notes)+'</div>':'')+actions('spool',s.short_code,s.spool_url)+'</div>':'')+'</div>'}).join('');
  box.querySelectorAll('.item').forEach(el=>el.onclick=()=>{OPEN='s'+el.dataset.code;renderSpools()});wireActions(box);}
-$('sref').onclick=()=>post({type:'spools'});$('sq').oninput=renderSpools;$('sempty').onchange=renderSpools;
+$('sref').onclick=()=>post({type:'spools'});$('sq').oninput=renderSpools;$('sempty').onchange=renderSpools;$('slow').onchange=renderSpools;
+$('stot').onclick=()=>{const b=$('totals');b.style.display=b.style.display==='none'?'':'none';renderTotals()};
 function renderSlots(){const box=$('slotlist');if(!S.slots.length){box.innerHTML='<div class="meta">No filament slots (open the Prepare tab).</div>';return}
  const opts=c=>'<option value="">\u2014 '+((S.settings||{}).auto_link?'auto':'no spool')+' \u2014</option>'+SPOOLS.filter(s=>s.remaining_grams>0||s.short_code===c).map(s=>'<option value="'+esc(s.short_code)+'"'+(s.short_code===c?' selected':'')+'>'+esc(s.short_code)+' \u00b7 '+spoolLabel(s)+' ('+esc(s.remaining_grams)+' g)</option>').join('')+
   (c&&!SPOOLS.some(s=>s.short_code===c)?'<option value="'+esc(c)+'" selected>'+esc(c)+'</option>':'');
  box.innerHTML=S.slots.map((s,i)=>{const c=S.slot_spools[String(i+1)]||'';return '<div class="slot">'+sw(s.color)+'<div class="meta" title="'+esc(s.preset)+'">Slot '+(i+1)+': '+esc(s.preset)+'</div><span></span><select data-slot="'+(i+1)+'">'+opts(c)+'</select></div>'}).join('');
  box.querySelectorAll('select').forEach(el=>el.onchange=()=>post({type:'map',slot:+el.dataset.slot,code:el.value}));
  const ls=S.last_slice;if(ls&&ls.grams&&ls.grams.length){const L=ls.links||ls.preview||{};$('slice').innerHTML=ls.grams.map((g,i)=>{const l=L[String(i+1)];return 'Slot '+(i+1)+': <b>'+g.toFixed(2)+' g</b>'+(l?' \u2192 '+esc(l.code)+(l.source==='auto'?' <span>(auto, '+esc(l.where)+(l.alts&&l.alts.length?', or '+esc(l.alts.join('/')):'')+')</span>':''):(g>0.005?' \u2192 <span>no spool</span>':''))}).join('<br>')+
-  '<br><span>'+esc(ls.when||'')+(ls.deducted?' \u00b7 already deducted':'')+'</span>';$('deduct').disabled=!S.plan_ok||ls.deducted;}
- else{$('slice').textContent='Slice a plate to see the grams per slot.';$('deduct').disabled=true}}
+  '<br><span>'+esc(ls.when||'')+(ls.deducted?' \u00b7 already deducted':'')+'</span>';$('deduct').disabled=!S.plan_ok||ls.deducted;
+  const ck=ls.checks||[];$('checks').innerHTML=ck.length?'<div class="chk"><b>Check before printing</b>'+ck.map(c=>'<div>'+esc(c.text)+'</div>').join('')+'</div>':'';}
+ else{$('slice').textContent='Slice a plate to see the grams per slot.';$('deduct').disabled=true;$('checks').innerHTML=''}
+ const u=S.last_undo;$('undo').style.display=u?'':'none';$('undoinfo').textContent=u?'Last: '+u.text:'';}
 $('slref').onclick=()=>post({type:'state'});$('deduct').onclick=()=>post({type:'deduct'});
+$('loadams').onclick=()=>arm($('loadams'),'Replace slots?',()=>post({type:'load_ams'}));
+$('undo').onclick=()=>{const u=S.last_undo;if(u)arm($('undo'),'Put it back?',()=>post({type:'undo',id:u.id}))};
+function renderHistory(){const box=$('hlist');if(!HIST)return;if(!HIST.length){box.innerHTML='<div class="empty">Nothing yet. Deductions show here after a print.</div>';return}
+ const K={deduct:'Deducted',empty:'Marked empty',undo:'Undone'};
+ box.innerHTML=HIST.map(h=>{const tot=(h.items||[]).reduce((a,i)=>a+(+i.grams||0),0);
+  return '<div class="item" style="cursor:default"><div class="head"><div class="grow"><div class="name">'+esc(K[h.kind]||h.kind)+(h.kind==='undo'?'':' '+tot.toFixed(1)+' g')+
+  (h.printer?' \u00b7 '+esc(h.printer):'')+'</div><div class="meta">'+esc(h.when)+(h.source?' \u00b7 '+esc(h.source):'')+(h.note?' \u00b7 '+esc(h.note):'')+'</div></div>'+
+  (h.undone?'<span class="tag grey">undone</span>':(h.kind!=='undo'?'<button class="btn ghost" data-undo="'+esc(h.id)+'">Undo</button>':''))+'</div>'+
+  '<ul class="hl">'+(h.items||[]).map(i=>'<li>'+esc(i.code)+(i.name?' '+esc(i.name):'')+': '+(h.kind==='undo'?'set to '+esc(i.after)+' g':'\u2212'+(+i.grams).toFixed(1)+' g'+(i.after!=null?', '+esc(i.after)+' g left':''))+'</li>').join('')+'</ul></div>'}).join('');
+ box.querySelectorAll('[data-undo]').forEach(b=>b.onclick=()=>arm(b,'Put it back?',()=>post({type:'undo',id:b.dataset.undo})));}
+$('href').onclick=()=>post({type:'history'});
+function renderQuota(){if(!Q||!Q.limit){return}$('quota').textContent='API '+Q.remaining+'/'+Q.limit;
+ $('quotainfo').textContent=Q.remaining+' of '+Q.limit+' left this month'+(Q.at?' (as of '+new Date(Q.at*1000).toLocaleString()+')':'')+'. Shared with anything else using your key, e.g. 3DFP AMS Sync. Resets on the 1st at 00:00 UTC.'}
 function fillSettings(){const st=S.settings||{};const sel=$('s_printer');sel.innerHTML=(S.printer_choices||['auto']).map(p=>'<option'+(p===st.printer?' selected':'')+'>'+esc(p)+'</option>').join('');
  $('s_nozzle').value=st.nozzle||'auto';$('s_pa').checked=!!st.pressure_advance;$('s_save').checked=!!st.save_preset;$('s_color').checked=!!st.set_color;
  $('s_offer').checked=!!st.offer_deduct;$('s_auto').checked=!!st.auto_deduct;$('s_link').checked=!!st.auto_link;$('s_open').checked=!!st.auto_open;
  $('s_amsadd').checked=!!st.ams_add_spools;$('amsbox').style.display=S.ams_sync?'':'none';
+ $('s_check').checked=!!st.slice_checks;if(document.activeElement!==$('s_margin'))$('s_margin').value=st.low_margin_g;
+ if(document.activeElement!==$('s_lowstock'))$('s_lowstock').value=st.low_stock_g;
  $('keyinfo').textContent=S.has_key?'Saved key ends in \u2026'+S.key_tail+'. Paste a new one to replace it.':'Starts with 3dfp_. Stored in this plugin\'s data folder.';}
 [['s_printer','printer'],['s_nozzle','nozzle']].forEach(([id,k])=>$(id).onchange=()=>post({type:'set',key:k,value:$(id).value}));
-[['s_pa','pressure_advance'],['s_save','save_preset'],['s_color','set_color'],['s_offer','offer_deduct'],['s_auto','auto_deduct'],['s_link','auto_link'],['s_open','auto_open'],['s_amsadd','ams_add_spools']].forEach(([id,k])=>$(id).onchange=()=>post({type:'set',key:k,value:$(id).checked}));
+[['s_pa','pressure_advance'],['s_save','save_preset'],['s_color','set_color'],['s_offer','offer_deduct'],['s_auto','auto_deduct'],['s_link','auto_link'],['s_open','auto_open'],['s_amsadd','ams_add_spools'],['s_check','slice_checks']].forEach(([id,k])=>$(id).onchange=()=>post({type:'set',key:k,value:$(id).checked}));
+[['s_margin','low_margin_g'],['s_lowstock','low_stock_g']].forEach(([id,k])=>$(id).onchange=()=>{const v=$(id).value;if(v!==''&&isFinite(+v))post({type:'set',key:k,value:+v})});
 $('savekey').onclick=()=>{const v=$('key').value.trim();if(v){post({type:'set',key:'api_key',value:v});$('key').value=''}};
 function showResult(r){const ul=a=>a&&a.length?'<ul>'+a.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'';
  $('out').innerHTML='<div class="msg '+(r.ok?'ok':'err')+'"><b>'+esc(r.title)+'</b>'+ul(r.lines)+(r.more&&r.more.length?'<details><summary>Details</summary>'+ul(r.more)+'</details>':'')+'</div>';
@@ -804,8 +959,9 @@ function onMsg(d){switch(d.type){
  case 'spools':SPOOLS=d.spools||[];renderSpools();renderSlots();break;
  case 'result':showResult(d);break;
  case 'busy':$('foot').classList.toggle('busy',!!d.on);$('status').textContent=d.text||(d.on?'Working\u2026':'Ready');
-  document.querySelectorAll('[data-act],#go,#sref,#deduct').forEach(b=>{if(d.on)b.disabled=true;else if(b.id!=='deduct')b.disabled=false});if(!d.on)renderSlots();break;
- case 'quota':$('quota').textContent=d.limit?'API '+d.remaining+'/'+d.limit:'';break;
+  document.querySelectorAll('[data-act],[data-empty],[data-undo],#go,#sref,#deduct,#loadams,#undo').forEach(b=>{if(d.on)b.disabled=true;else if(b.id!=='deduct')b.disabled=false});if(!d.on)renderSlots();break;
+ case 'quota':Q=d;renderQuota();break;
+ case 'history':HIST=d.items||[];$('hinfo').textContent=HIST.length?HIST.length+' entr'+(HIST.length==1?'y':'ies')+', newest first.':'Deductions, spools marked empty and undos.';renderHistory();break;
  case 'refresh':post({type:'state'});break;}}
 (function boot(){if(window.orca&&orca.onMessage){orca.onMessage(onMsg);post({type:'hello'})}else setTimeout(boot,50)})();
 </script></body></html>"""
@@ -831,6 +987,9 @@ DEFAULTS = {
     "auto_link": True,     # match used slots to the spools 3DFP has in this printer's AMS
     "auto_open": True,
     "ams_add_spools": True,  # read by the 3DFP AMS Sync service, if one runs on this PC (it leaves ams_sync.json here)
+    "slice_checks": True,  # after each slice: enough filament, matching type/colour, manual links still in this printer
+    "low_margin_g": 10,    # grams a spool should still have after the print
+    "low_stock_g": 150,    # the Spools tab's low stock filter and totals
     "slot_spools": {},     # {"1": "ABC123"}
     "preset_spools": {},   # {preset name: short code}, to relink a slot when that preset is selected again
 }
@@ -896,7 +1055,9 @@ if orca is not None:
             self.busy = False
             self.client = None
             self.spools = []
+            self.spools_at = 0.0   # when self.spools was fetched from 3DFP
             self.last_slice = {}
+            self.hist_lock = threading.Lock()
             self.last_state = None
             self.seen_events = set()
 
@@ -931,6 +1092,10 @@ if orca is not None:
         def on_load(self):
             storage_dir()  # prime while inside a plugin callback
             self.spools = _read_json("spools.json", [])
+            try:
+                self.spools_at = os.path.getmtime(os.path.join(storage_dir(), "spools.json")) if self.spools else 0.0
+            except OSError:
+                self.spools_at = 0.0
 
         def on_unload(self):
             self.panel = None
@@ -1015,8 +1180,7 @@ if orca is not None:
                 finally:
                     with self.lock:
                         self.busy = False
-                    if self.client and self.client.quota:
-                        self.post(dict(type="quota", **self.client.quota))
+                    self.save_quota()
                     self.post({"type": "busy", "on": False})
                     self.post({"type": "refresh"})
 
@@ -1140,28 +1304,104 @@ if orca is not None:
             key = s.get("api_key") or ""
             self.last_state = st if st.get("slots") else self.last_state
             ls = self.last_slice
+            if not s.get("slice_checks", True):
+                ls.pop("checks", None)
             if ls.get("grams") and not ls.get("deducted"):
-                if s.get("auto_link", True):
-                    links, unmatched = link_slots(ls.get("slots") or st["slots"], ls["grams"], self.spools,
-                                                  ls.get("printer_name") or st["printer_name"],
-                                                  ls.get("printer_code") or st["printer_code"], slot_spools)
-                else:
-                    links, _ = link_slots([], ls["grams"], [], "", "", slot_spools)
+                links, _ = self.preview_links(ls, s, st, slot_spools)
                 ls["preview"] = {k: {"code": v["code"], "source": v["source"], "where": v["where"], "alts": v["alts"]}
                                  for k, v in links.items()}
+                if s.get("slice_checks", True) and "checks" in ls:  # follow link changes made in Slots since the slice
+                    ls["checks"] = slice_checks(ls["grams"], ls.get("slots") or st["slots"], links, self.spools,
+                                                ls.get("printer_name") or st["printer_name"],
+                                                ls.get("printer_code") or st["printer_code"], float(s.get("low_margin_g") or 0))
             plan = links_plan(ls.get("grams") or [], ls.get("preview") or {})
             self.post({
                 "type": "state", "printer_name": st["printer_name"], "printer_code": st["printer_code"],
                 "nozzle": st["nozzle"], "slots": st["slots"], "slot_spools": slot_spools,
                 "settings": {k: s[k] for k in ("printer", "nozzle", "pressure_advance", "save_preset", "set_color",
-                                               "offer_deduct", "auto_deduct", "auto_link", "auto_open", "ams_add_spools")},
+                                               "offer_deduct", "auto_deduct", "auto_link", "auto_open", "ams_add_spools",
+                                               "slice_checks", "low_margin_g", "low_stock_g")},
                 "ams_sync": self.ams_sync(),
                 "printer_choices": PRINTER_CHOICES, "has_key": bool(key), "key_tail": key[-4:] if key else "",
-                "spools": self.spools, "last_slice": {k: v for k, v in ls.items() if k in ("grams", "when", "deducted", "preview", "links")},
+                "spools": self.spools,
+                "last_slice": {k: v for k, v in ls.items() if k in ("grams", "when", "deducted", "preview", "links", "checks")},
                 "plan_ok": bool(plan) or bool(ls.get("grams") and s.get("auto_link", True) and key),
+                "last_undo": self.last_undoable(),
             })
-            if self.client and self.client.quota:
-                self.post(dict(type="quota", **self.client.quota))
+            q = _read_json("quota.json", None)
+            if isinstance(q, dict) and q.get("limit"):
+                self.post({"type": "quota", "limit": q["limit"], "remaining": q.get("remaining"), "at": q.get("at")})
+
+        def preview_links(self, ls, s, st, slot_spools):
+            """The links a slice would get now, from the cached spool list (no request)."""
+            if s.get("auto_link", True):
+                return link_slots(ls.get("slots") or st["slots"], ls["grams"], self.spools,
+                                  ls.get("printer_name") or st["printer_name"],
+                                  ls.get("printer_code") or st["printer_code"], slot_spools)
+            return link_slots([], ls["grams"], [], "", "", slot_spools)
+
+        # ----- API quota: every request counts, so keep the last answer for the Settings tab
+        def save_quota(self):
+            q = dict(self.client.quota) if self.client and self.client.quota else None
+            if not q:
+                return
+            old = _read_json("quota.json", {}) or {}
+            q["at"] = int(time.time())
+            month = time.strftime("%Y-%m", time.gmtime())
+            q["warned"] = old.get("warned") if old.get("warned") == month else ""
+            if q["remaining"] < 100 and q["warned"] != month:
+                q["warned"] = month
+                self.notify("only %d of %d API requests left this month (they reset on the 1st at 00:00 UTC)."
+                            % (q["remaining"], q["limit"]), warn=True)
+            try:
+                _write_json("quota.json", q)
+            except OSError:
+                pass
+            self.post({"type": "quota", "limit": q["limit"], "remaining": q["remaining"], "at": q["at"]})
+
+        # ----- history: deductions, spools marked empty, undos (history.json, oldest first)
+        def history(self):
+            h = _read_json("history.json", None)
+            if isinstance(h, list):
+                return h
+            try:  # first run: rebuild what events.log recorded
+                with open(os.path.join(storage_dir(), "events.log"), encoding="utf-8", errors="replace") as f:
+                    h = history_from_log(f.read())
+            except OSError:
+                h = []
+            try:
+                _write_json("history.json", h)
+            except OSError:
+                pass
+            return h
+
+        def add_history(self, entry, mark_undone=None):
+            with self.hist_lock:
+                h = self.history()
+                entry.setdefault("id", "%d-%d" % (int(time.time() * 1000), len(h)))
+                entry.setdefault("when", time.strftime("%Y-%m-%d %H:%M:%S"))
+                if mark_undone:
+                    for e in h:
+                        if e.get("id") == mark_undone:
+                            e["undone"] = True
+                h.append(entry)
+                _write_json("history.json", h[-300:])
+            return entry["id"]
+
+        def last_undoable(self):
+            for e in reversed(self.history()):
+                if e.get("kind") in ("deduct", "empty") and not e.get("undone"):
+                    what = ", ".join("%.1f g %s %s" % (float(i.get("grams") or 0), "from" if e["kind"] == "deduct" else "on",
+                                                       i.get("code")) for i in e.get("items") or [])
+                    return {"id": e["id"], "text": "%s %s (%s)" % ("deducted" if e["kind"] == "deduct" else "marked empty",
+                                                                    what, e.get("when", "")[5:16])}
+                if e.get("kind") in ("deduct", "empty"):
+                    return None  # the newest one is already undone: older ones from the History tab
+            return None
+
+        def _desc(self, code):
+            sp = next((x for x in self.spools if x.get("short_code") == code), None) or {}
+            return " ".join(str(x) for x in (sp.get("material"), sp.get("material_type"), sp.get("color")) if x)
 
         # ----- messages from the panel (UI thread)
         def on_message(self, d):
@@ -1173,6 +1413,12 @@ if orca is not None:
                     key = d.get("key")
                     if key in DEFAULTS and key not in ("slot_spools", "preset_spools"):
                         val = d.get("value")
+                        if key in ("low_margin_g", "low_stock_g"):
+                            try:
+                                val = max(0, min(10000, int(round(float(val)))))
+                            except (TypeError, ValueError):
+                                self.push_state()
+                                return
                         if key == "api_key":
                             val = str(val or "").strip()
                             if val and not val.startswith("3dfp_"):
@@ -1216,6 +1462,14 @@ if orca is not None:
                     self.push_state()
                 elif t == "deduct":
                     self.start_deduct(manual=True)
+                elif t == "history":
+                    self.post({"type": "history", "items": list(reversed(self.history()))})
+                elif t == "undo":
+                    self.spawn("Putting the filament back…", self.job_undo, str(d.get("id") or ""))
+                elif t == "empty":
+                    self.spawn("Marking the spool empty…", self.job_empty, str(d.get("code") or ""))
+                elif t == "load_ams":
+                    self.spawn("Loading your AMS from 3DFP…", self.job_load_ams, self.host_state())
                 elif t == "open_url":
                     url = str(d.get("url") or "")
                     if url.startswith(("https://3dfilamentprofiles.com/", "https://spooldb.com/", "https://3dfp.to/")):
@@ -1238,6 +1492,7 @@ if orca is not None:
                                                    "rgb", "notes", "location", "remaining_grams", "filament_id")}
                            for sp in (r.get("data") or [])]
             self.spools.sort(key=lambda sp: (sp.get("brand") or "", sp.get("material") or "", sp.get("color") or ""))
+            self.spools_at = time.time()
             try:
                 _write_json("spools.json", self.spools)
             except OSError:
@@ -1245,7 +1500,11 @@ if orca is not None:
             self.post({"type": "spools", "spools": self.spools})
 
         def job_profile(self, action, kind, ident, slot, st):
-            s = self.settings()
+            self.result(*self.use_profile(action, kind, ident, slot, st, self.settings()))
+
+        def use_profile(self, action, kind, ident, slot, st, s, remember=True):
+            """Fetch 3DFP's preset for a filament or spool; save it and/or put it on a slot. remember: link the slot
+            (and the preset) to that spool. -> (ok, title, lines, more). Worker thread only."""
             args = dict(printer=st["printer_code"], nozzle=st["nozzle"], pressure_advance=bool(s.get("pressure_advance")))
             if kind == "spool":
                 prof = self.api().spool_profile(ident, **args)
@@ -1293,15 +1552,13 @@ if orca is not None:
                         lines.append("Couldn't write the preset file: %s" % e)
 
             if action == "save":
-                self.result(saved is not None, ("Saved " if saved else "Not saved: ") + name, lines, more)
-                return
+                return saved is not None, ("Saved " if saved else "Not saved: ") + name, lines, more
 
             # apply to the slot now, on top of a system preset the slot can select
             if not base:
                 lines.insert(0, "No %s system preset is available for this printer, so it wasn't applied to a slot. "
                                 "Tick one in the filament selection, or restart to use the saved preset." % (ftype or "matching"))
-                self.result(False, "Not applied: " + name, lines, more)
-                return
+                return False, "Not applied: " + name, lines, more
             if base != inherits:
                 more.append("3DFP's base \u201c%s\u201d isn't in this slot's list (tick it in the filament selection "
                             "to use it); used \u201c%s\u201d." % (inherits, base))
@@ -1310,7 +1567,7 @@ if orca is not None:
             if s.get("set_color") and colour:  # OrcaSlicer's filament presets carry the slot colour here
                 values["default_filament_colour"] = [colour]
             applied, skipped = self.apply_to_slot(slot, base, values, st["catalog"])
-            if kind == "spool":  # this slot now holds that spool
+            if kind == "spool" and remember:  # this slot now holds that spool
                 m = dict(s.get("slot_spools") or {})
                 m[str(slot)] = ident
                 self.set_setting("slot_spools", m)
@@ -1323,7 +1580,7 @@ if orca is not None:
             if skipped:
                 lines.append("%d setting%s couldn't be applied (see details)." % (len(skipped), "" if len(skipped) == 1 else "s"))
                 more += ["skipped %s: %s" % (k, e) for k, e in skipped]
-            self.result(True, name, lines, more)
+            return True, name, lines, more
 
         def apply_to_slot(self, slot, base, values, catalog):
             """Select base in the slot, then stage and commit all values; fall back to one key at a time."""
@@ -1399,8 +1656,41 @@ if orca is not None:
                                    "printer_code": st.get("printer_code", "")}
                 self.log("slice: %s g on %s" % (", ".join("%.2f" % g for g in grams), st.get("printer_name") or "?"))
                 self.post({"type": "refresh"})
+                if self.settings().get("slice_checks", True):
+                    threading.Thread(target=self._slice_check_job, args=(self.last_slice,), name="3dfp-check",
+                                     daemon=True).start()
             else:
                 self.log("slice: no filament stats in " + os.path.basename(path))
+
+        SPOOLS_MAX_AGE = 3600  # a slice check reloads the spool list when it's older than this (1 request)
+
+        def _slice_check_job(self, ls):
+            """After a slice: warn (notification + Slots tab) about short spools, mismatches and stale links."""
+            try:
+                s = self.settings()
+                if s.get("api_key") and time.time() - self.spools_at > self.SPOOLS_MAX_AGE:
+                    try:
+                        self.job_spools()
+                        self.save_quota()
+                    except ApiError as e:
+                        self.log("slice check: spool list not refreshed (%s)" % e.friendly())
+                if ls is not self.last_slice or not self.spools:
+                    return
+                slot_spools = dict(s.get("slot_spools") or {})
+                st = {"slots": ls.get("slots") or [], "printer_name": ls.get("printer_name", ""),
+                      "printer_code": ls.get("printer_code", "")}
+                links, _ = self.preview_links(ls, s, st, slot_spools)
+                checks = slice_checks(ls["grams"], ls.get("slots") or [], links, self.spools, st["printer_name"],
+                                      st["printer_code"], float(s.get("low_margin_g") or 0))
+                ls["checks"] = checks
+                self.log("slice check: " + ("; ".join(c["text"] for c in checks) if checks else "ok"))
+                if checks:
+                    texts = [c["text"] for c in checks]
+                    self.notify("check before printing: " + "; ".join(texts[:3])
+                                + (" (and %d more in the 3DFP panel)" % (len(texts) - 3) if len(texts) > 3 else "."), warn=True)
+                self.post({"type": "refresh"})
+            except Exception as e:
+                self.log("slice check failed: %s: %s" % (type(e).__name__, e))
 
         def _on_print_started(self):
             s = self.settings()
@@ -1497,17 +1787,33 @@ if orca is not None:
                             or ["No slot used filament."])
                 return
             r = self.api().deduct(plan) or {}
-            ok_lines, bad = [], []
+            ok_lines, bad, items = [], [], []
             for e in r.get("data") or []:
                 if e.get("error"):
                     bad.append("%s: %s" % (e.get("short_code"), (e["error"] or {}).get("message")))
                 else:
-                    ok_lines.append("%s: −%s g, %s g left" % (self._spool_name(e.get("short_code"), links),
+                    code = e.get("short_code")
+                    ok_lines.append("%s: −%s g, %s g left" % (self._spool_name(code, links),
                                                                    e.get("deducted_grams"), e.get("remaining_grams")))
-                    for sp in self.spools:
-                        if sp.get("short_code") == e.get("short_code"):
-                            sp["remaining_grams"] = e.get("remaining_grams")
+                    sp = next((x for x in self.spools if x.get("short_code") == code), None)
+                    items.append({"code": code, "name": self._desc(code),
+                                  "grams": float(e.get("deducted_grams") or plan.get(code) or 0),
+                                  "after": e.get("remaining_grams"), "location": (sp or {}).get("location")})
+                    if sp is not None:
+                        sp["remaining_grams"] = e.get("remaining_grams")
+                        if "location" in e:
+                            sp["location"] = e.get("location")
             self.log("deduct (%s): %s" % ("button" if manual else "print start", "; ".join(ok_lines + bad) or "no answer"))
+            if items:
+                try:
+                    self.last_slice["history_id"] = self.add_history({
+                        "kind": "deduct", "source": "button" if manual else "print start",
+                        "printer": printer_spools(self.spools, self.last_slice.get("printer_name", ""),
+                                                  self.last_slice.get("printer_code", ""))[0]
+                                   or self.last_slice.get("printer_name", ""),
+                        "note": self.last_slice.get("when", ""), "items": items})
+                except OSError as e:
+                    self.log("history not written: %s" % e)
             if ok_lines:
                 self.last_slice["deducted"] = True
                 try:
@@ -1520,6 +1826,122 @@ if orca is not None:
             if not manual:
                 self.notify("deducted " + "; ".join(ok_lines) if ok_lines else "spool update failed: " + "; ".join(bad),
                             warn=bool(bad))
+
+        def _apply_answer(self, r, sent):
+            """Update the cached spools from a batch PATCH answer. -> (ok rows, error lines)."""
+            ok, bad = [], []
+            for e in (r or {}).get("data") or []:
+                if e.get("error"):
+                    bad.append("%s: %s" % (e.get("short_code"), (e["error"] or {}).get("message")))
+                    continue
+                ok.append(e)
+                for sp in self.spools:
+                    if sp.get("short_code") == e.get("short_code"):
+                        sp["remaining_grams"] = e.get("remaining_grams", sp.get("remaining_grams"))
+                        if "location" in e:
+                            sp["location"] = e.get("location")
+                        elif sent.get(e.get("short_code"), {}).get("location"):
+                            sp["location"] = sent[e.get("short_code")]["location"]
+            try:
+                _write_json("spools.json", self.spools)
+            except OSError:
+                pass
+            self.post({"type": "spools", "spools": self.spools})
+            return ok, bad
+
+        def job_undo(self, entry_id):
+            """Put back what a deduction (or Mark empty) took off: today's weight + those grams, so later changes stay."""
+            entry = next((e for e in self.history() if e.get("id") == entry_id), None)
+            if entry is None or entry.get("kind") not in ("deduct", "empty"):
+                self.result(False, "Nothing to undo: that history entry is gone.")
+                return
+            if entry.get("undone"):
+                self.result(False, "That was already undone.")
+                return
+            self.job_spools()  # the weights as 3DFP has them now (1 request)
+            current = {sp.get("short_code"): sp for sp in self.spools}
+            items, problems = undo_items(entry, current)
+            if not items:
+                self.result(False, "Nothing put back", problems)
+                return
+            ok, bad = self._apply_answer(self.api().update(items), {i["short_code"]: i for i in items})
+            lines = ["%s: %s g" % (self._spool_name(e.get("short_code")), e.get("remaining_grams")) for e in ok]
+            if ok:
+                self.add_history({"kind": "undo", "note": "undid %s from %s" % (entry["kind"], entry.get("when", "")),
+                                  "printer": entry.get("printer", ""),
+                                  "items": [{"code": e.get("short_code"), "name": self._desc(e.get("short_code")),
+                                             "grams": 0, "after": e.get("remaining_grams")} for e in ok]},
+                                 mark_undone=entry_id)
+                if self.last_slice.get("history_id") == entry_id:
+                    self.last_slice["deducted"] = False  # the slice can be deducted again, e.g. after fixing a link
+            self.log("undo %s: %s" % (entry_id, "; ".join(lines + bad + problems)))
+            self.result(bool(ok) and not bad, "Filament put back" if ok else "Nothing put back", lines + bad + problems)
+            self.post({"type": "history", "items": list(reversed(self.history()))})
+
+        def job_empty(self, code):
+            sp = next((x for x in self.spools if x.get("short_code") == code), None)
+            if sp is None:
+                self.result(False, "Spool %s isn't in the list: press Refresh." % code)
+                return
+            before, where = sp.get("remaining_grams") or 0, sp.get("location")
+            ok, bad = self._apply_answer(self.api().update([{"short_code": code, "remaining_grams": 0}]), {})
+            if ok:
+                self.add_history({"kind": "empty", "source": "Spools tab",
+                                  "items": [{"code": code, "name": self._desc(code), "grams": float(before), "after": 0,
+                                             "location": where}]})
+                self.log("marked empty: %s (%s g, was at %s)" % (code, before, where or "Shelf"))
+                self.result(True, "%s marked empty" % self._spool_name(code),
+                            ["It had %s g. 3DFP applies your empty-spool setting (it moves to Empty). Undo from History "
+                             "or the Slots tab if that was a mistake." % before])
+            else:
+                self.result(False, "Spool not changed", bad)
+
+        def job_load_ams(self, st):
+            """Put the spools 3DFP has in this printer onto Orca's filament slots, in AMS order."""
+            s = self.settings()
+            if not st.get("slots"):
+                self.result(False, "No filament slots: open the Prepare tab first.")
+                return
+            self.job_spools()  # current locations (1 request)
+            printer, plan, left = ams_load_plan(self.spools, st["printer_name"], st["printer_code"], len(st["slots"]))
+            if not printer:
+                self.result(False, "3DFP has no spools in a printer named like “%s”" % (st["printer_name"] or st["printer_code"]),
+                            ["Locations look like “Printer: H2C, AMS: A-1”. 3DFP AMS Sync keeps them current."])
+                return
+            if not plan:
+                self.result(False, "3DFP has no spools in %s's AMS" % printer)
+                return
+            lines, more, links, failed = [], [], dict(s.get("slot_spools") or {}), 0
+            for slot, label, sp in plan:
+                code = sp.get("short_code")
+                try:
+                    ok, title, ln, mo = self.use_profile("use", "spool", code, slot, st, s, remember=False)
+                except ApiError as e:
+                    ok, title, ln, mo = False, e.friendly(), [], []
+                if ok:
+                    lines.append("Slot %d: %s %s (%s)" % (slot, label, self._desc(code), code))
+                    if s.get("auto_link", True):
+                        links.pop(str(slot), None)  # auto-link finds it from its location; a manual link would go stale
+                    else:
+                        links[str(slot)] = code
+                else:
+                    failed += 1
+                    lines.append("Slot %d: %s %s not loaded: %s" % (slot, label, code, title))
+                more += ["slot %d: %s" % (slot, x) for x in ln[1:] + mo]
+            self.set_setting("slot_spools", links)
+            if left:
+                lines.append("OrcaSlicer has %d filament slots and %s has %d spools: add %d filament%s in OrcaSlicer's "
+                             "list, then press Load my AMS again for %s." % (
+                                 len(st["slots"]), printer, len(plan) + len(left), len(left), "" if len(left) == 1 else "s",
+                                 ", ".join(label for label, _sp in left)))
+            elif len(plan) < len(st["slots"]):
+                lines.append("Slot%s %s left as %s." % ("s" if len(st["slots"]) - len(plan) > 1 else "",
+                                                        ", ".join(str(i) for i in range(len(plan) + 1, len(st["slots"]) + 1)),
+                                                        "they were" if len(st["slots"]) - len(plan) > 1 else "it was"))
+            more.append("%d requests: 1 for the spool list, 1 per spool's profile." % (1 + len(plan)))
+            self.log("load AMS %s: %s" % (printer, "; ".join(lines)))
+            self.result(failed == 0, "Loaded %d spool%s from %s" % (len(plan) - failed, "" if len(plan) - failed == 1 else "s",
+                                                                     printer), lines, more)
 
     @orca.plugin
     class ThreeDFPPlugin(orca.base):

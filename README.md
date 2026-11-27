@@ -22,8 +22,9 @@ A **3DFP** panel docks on the right of the Prepare/Preview tabs:
 | Tab | |
 |---|---|
 | **Find** | Search the 3DFP catalog (brand, material, colour, hex). Click a filament for temps, density, flow ratio, max volumetric speed, price. |
-| **My spools** | Your 3DFP spools with grams left and location. |
-| **Slots** | Link each filament slot to a spool; shows the grams per slot from the last slice; **Deduct from 3DFP spools**. |
+| **Spools** | Your 3DFP spools with grams left and location. **low stock** lists the spools under the low stock weight (150 g by default), lowest first; **Totals** shows the filament left per material. Open a spool for **Mark empty**. |
+| **Slots** | Link each filament slot to a spool; **Load my AMS**; the grams per slot from the last slice and its checks; **Deduct from 3DFP spools** and **Undo last deduction**. |
+| **History** | Every deduction, spool marked empty and undo, newest first, each with **Undo**. |
 | **Settings** | API key, printer/nozzle override (auto-detected from the printer preset, e.g. H2C / P2S, 0.4), pressure advance, options below. |
 
 **Use in slot N** (for a catalog filament or one of your spools):
@@ -55,7 +56,32 @@ Which spool a slot uses:
 The plugin can't see the AMS mapping you confirm in the send dialog: the OrcaSlicer plugin API doesn't expose it. If you
 remap a slot to a different tray there, pick that spool in **Slots** before sending.
 
-Slices, print starts, the links chosen and each deduction are logged to `events.log` in the plugin's data folder.
+**Slice checks** (on by default, **Check each slice against your spools** in Settings): after each slice, the plugin looks at the
+spool each used slot would be deducted from and warns, in a notification and under *Last slice* in Slots, when:
+- the spool doesn't have enough filament for the print plus a spare margin (**Spare filament**, 10 g by default). A spool used by
+  several slots is checked against their total;
+- the spool's material doesn't match the slot's filament type (PLA slot, PETG spool), or its colour is clearly different;
+- a slot you linked by hand has a spool that 3DFP has somewhere other than this printer (on a shelf, in the other printer), which
+  usually means the spool was swapped since;
+- a linked spool isn't in your 3DFP spools any more.
+
+It uses the spool list the plugin already has, and reloads it (one request) only when it's more than an hour old.
+
+**Load my AMS** (Slots) sets the filament slots from the spools 3DFP has in the selected printer: slot 1 gets the spool in AMS
+A-1, slot 2 the next AMS position, and so on (AMS HT and external spools last). Each slot gets that spool's 3DFP preset, as
+with **Use in slot**, and its colour. With auto-link on, any link you set by hand on those slots is removed, because auto-link finds the
+spools from their locations; with it off, the slots are linked to the spools. If OrcaSlicer has fewer filament slots than the AMS
+has spools, the result says how many to add. Press it twice: the first press asks you to confirm. It costs one request for the
+spool list plus one per spool.
+
+**Undo** puts back what a deduction or **Mark empty** took off. It adds the grams to the spool's weight on 3DFP now, so
+anything deducted since stays deducted. A spool that 3DFP moved to *Empty* goes back to its location from before. If you undo the
+last slice's deduction, you can deduct it again, e.g. after linking the right spool. History is kept in `history.json` in the
+plugin's data folder (the last 300 entries); deductions logged before 1.2.0 are imported from `events.log`, without their locations.
+
+**Mark empty** sets a spool to 0 g; 3DFP then applies your empty-spool setting, as on the website (it moves to *Empty*).
+
+Slices, slice checks, print starts, the links chosen and each deduction are logged to `events.log` in the plugin's data folder.
 
 ## 3DFP AMS Sync
 
@@ -89,7 +115,10 @@ The panel shares the right-hand dock with other plugin panels (SlicePilot, Maker
 ## API quota
 
 Searches only run when you press Search or Enter, filament details are cached for the session, and the spool list is fetched only when you press
-Refresh. A deduction for all slots is one request. The footer shows the remaining monthly quota (`API 982/1000`).
+Refresh, when a print starts, or when a slice check finds it more than an hour old. A deduction for all slots is one request; an undo is two
+(the current weights, then the update). The footer and Settings show the requests left this month (`API 982/1000`). The plugin keeps the
+last count it saw, with the time, so Settings shows it after a restart too. The quota is per account, so anything else using your key, such
+as 3DFP AMS Sync, uses it too. Below 100 requests left you get one warning a month.
 
 ## Orca Cloud upload files
 

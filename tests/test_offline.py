@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import types
 
 PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "threedfp_profiles.py")
@@ -205,6 +206,53 @@ check("no ABS in the AMS", [u["slot"] for u in unmatched], ["5"])
 check("empty spool skipped", m.link_slots([{"type": "PLA", "color": "#FFFFFF"}], [1.0], [spools[6]], H2C)[0], {})
 check("printer not in 3DFP", m.link_slots(slots, [1.0], spools, "Voron 2.4")[1][0]["slot"], "1")
 
+# --- slice checks: short spool, type / colour mismatch, stale manual link
+low = [sp("K2", "PETG", "Basic", "#000000", "Printer: H2C, AMS: A-2", 12),
+       sp("Y1", "PETG", "Basic", "#FCE300", "Printer: H2C, AMS: A-1"),
+       sp("S9", "PLA", "Basic", "#FFFFFF", "Shelf: Closet Shelf 3"),
+       sp("M1", "PLA", "Silk", "#FF0000,#0000FF", "Printer: H2C, AMS: B-1")]
+links = {"1": {"code": "K2", "source": "auto", "where": "H2C A-2", "alts": []},
+         "2": {"code": "S9", "source": "manual", "where": "", "alts": []},
+         "3": {"code": "M1", "source": "manual", "where": "", "alts": []},
+         "4": {"code": "GONE", "source": "manual", "where": "", "alts": []}}
+cslots = [{"type": "PETG", "color": "#000000"}, {"type": "PETG", "color": "#000000"},
+          {"type": "PLA", "color": "#00FF00"}, {"type": "PLA", "color": "#000000"}]
+ck = m.slice_checks([10.0, 5.0, 1.0, 1.0], cslots, links, low, H2C, "H2C", margin=10)
+kinds = sorted((c["slot"], c["kind"]) for c in ck)
+check("checks found", kinds, [("1", "low"), ("2", "colour"), ("2", "stale"), ("2", "type"), ("4", "missing")])
+check("low names grams", [c["text"] for c in ck if c["kind"] == "low"], ["Slot 1 needs 10 g, spool K2 has 12 g"])
+check("multicolour spool: no colour warning", ("3", "colour") in kinds, False)
+check("manual link inside this printer isn't stale", ("3", "stale") in kinds, False)
+check("enough filament: no warning", m.slice_checks([1.0], cslots, {"1": links["1"]}, low, H2C, "H2C", 0), [])
+two = {"1": {"code": "Y1", "source": "auto"}, "2": {"code": "Y1", "source": "auto"}}
+check("one spool used by two slots is summed", [c["text"] for c in m.slice_checks(
+    [300.0, 250.0], [{"type": "PETG", "color": "#FCE300"}] * 2, two, low, H2C, "H2C", 10)], ["Slot 1 needs 550 g, spool Y1 has 500 g"])
+check("printer not tracked: no stale warning", [c["kind"] for c in m.slice_checks(
+    [1.0], [{"type": "PLA", "color": "#FFFFFF"}], {"1": links["2"]}, low, "Voron 2.4", "ANY", 0)], [])
+
+# --- Load my AMS: this printer's spools in AMS order onto the filament slots
+pr, plan, left = m.ams_load_plan(spools, H2C, "H2C", 4)
+check("load printer", pr, "H2C")
+check("load order", [(i, label, s["short_code"]) for i, label, s in plan],
+      [(1, "A-1", "Y1"), (2, "A-2", "K2"), (3, "A-3", "K3"), (4, "A-4", "G4")])
+check("load leftovers", [label for label, _ in left], ["B-4", "HT-A-1", "External Spool 1"])
+check("load fewer spools than slots", len(m.ams_load_plan(spools, "Bambu Lab P2S 0.4 nozzle", "P2S", 4)[1]), 1)
+check("load unknown printer", m.ams_load_plan(spools, "Voron", "ANY", 4)[0], "")
+
+# --- history: rebuilt from events.log, and undo puts the grams back on today's weight
+logtext = ("2026-11-24 10:00:00 slice: 12.30 g on H2C\n"
+           "2026-11-24 10:02:00 deduct (print start): K2 (PETG Basic Black, H2C A-2): −12.3 g, 487.7 g left; "
+           "Y1: −2.5 g, 497.5 g left\n2026-11-24 11:00:00 deduct (button): nothing\n")
+hist = m.history_from_log(logtext)
+check("history from log", [(h["when"], h["source"], [(i["code"], i["grams"], i["after"]) for i in h["items"]]) for h in hist],
+      [("2026-11-24 10:02:00", "print start", [("K2", 12.3, 487.7), ("Y1", 2.5, 497.5)])])
+entry = {"items": [{"code": "K2", "grams": 12.3}, {"code": "E0", "grams": 30.0, "location": "Printer: H2C, AMS: A-4"},
+                   {"code": "NOPE", "grams": 1.0}]}
+items, probs = m.undo_items(entry, {"K2": {"remaining_grams": 480}, "E0": {"remaining_grams": 0, "location": "Empty"}})
+check("undo adds to today's weight", items[0], {"short_code": "K2", "remaining_grams": 492})
+check("undo of an emptied spool puts it back", items[1], {"short_code": "E0", "remaining_grams": 30, "location": "Printer: H2C, AMS: A-4"})
+check("undo names missing spools", probs, ["NOPE: no longer in your 3DFP spools"])
+
 # --- embedded logo: a 64x64 PNG, and the panel HTML has the slot it goes into
 import base64, struct
 png = base64.b64decode(m.LOGO_PNG_B64)
@@ -266,6 +314,83 @@ cap.last_slice = {"grams": [4.0], "slots": [slots[4]], "printer_name": H2C, "pri
 notes.clear()
 cap._print_started_job()
 check("unmatched slot warns", notes and notes[0][0] == 1 and "slot 1" in notes[0][1], True)
+
+# deduct -> history -> undo, Mark empty, quota, with a stub API
+class StubApi:
+    def __init__(self):
+        self.sent, self.quota = [], {"limit": 1000, "remaining": 90}
+
+    def deduct(self, used):
+        self.sent.append(("deduct", dict(used)))
+        return {"data": [{"short_code": c, "deducted_grams": g, "remaining_grams": 500 - g} for c, g in used.items()]}
+
+    def update(self, items):
+        self.sent.append(("update", list(items)))
+        return {"data": [{"short_code": i["short_code"], "remaining_grams": i.get("remaining_grams")} for i in items]}
+
+
+api = StubApi()
+cap.client = api
+cap.post = lambda obj: None
+cap.result = lambda ok, title, lines=(), more=(): notes.append(("result", ok, title, list(lines)))
+cap.spools = [dict(s) for s in spools]
+cap.last_slice = {"grams": [10.0, 2.5], "slots": slots[:2], "printer_name": H2C, "printer_code": "H2C", "deducted": False,
+                  "when": "sliced 10:00"}
+cap.resolve_links(refresh=False)
+cap.job_deduct(manual=True)
+h = cap.history()
+check("deduction recorded", [(e["kind"], e["printer"], [(i["code"], i["grams"], i["after"], i["location"]) for i in e["items"]])
+                             for e in h if not e.get("imported")],
+      [("deduct", "H2C", [("K2", 10.0, 490.0, "Printer: H2C, AMS: A-2"), ("Y1", 2.5, 497.5, "Printer: H2C, AMS: A-1")])])
+check("last deduction can be undone", (cap.last_undoable() or {}).get("id"), h[-1]["id"])
+check("low quota warns once", sum("API requests left" in n[1] for n in notes if n[0] == 1), 0)
+cap.save_quota()
+cap.save_quota()
+check("low quota warns once", sum("API requests left" in str(n[1]) for n in notes), 1)
+check("quota kept for Settings", mo._read_json("quota.json", {})["remaining"], 90)
+cap.spools[1]["remaining_grams"] = 470  # used again since the deduction
+cap.job_undo(h[-1]["id"])
+check("undo sends today's weight plus the grams", api.sent[-1],
+      ("update", [{"short_code": "K2", "remaining_grams": 480}, {"short_code": "Y1", "remaining_grams": 500}]))
+h = cap.history()
+check("undo recorded and the deduction marked", (h[-1]["kind"], h[-2].get("undone")), ("undo", True))
+check("nothing left to undo", cap.last_undoable(), None)
+check("slice can be deducted again", cap.last_slice["deducted"], False)
+cap.job_undo(h[-2]["id"])
+check("no double undo", notes[-1][1:3], (False, "That was already undone."))
+cap.job_empty("G4")
+check("mark empty sends 0 g", api.sent[-1], ("update", [{"short_code": "G4", "remaining_grams": 0}]))
+check("mark empty can be undone", cap.history()[-1]["items"][0]["grams"], 500.0)
+
+# Load my AMS with the profile step stubbed: spools in AMS order, manual links cleared (auto-link finds them)
+used = []
+cap.use_profile = lambda action, kind, ident, slot, st, s, remember=True: (used.append((slot, ident, remember)) or (True, ident, ["x"], []))
+cap.set_setting("slot_spools", {"1": "OLD", "4": "OLD4"})
+cap.job_load_ams({"slots": slots[:3], "printer_name": H2C, "printer_code": "H2C"})
+check("load AMS applies in order", used, [(1, "Y1", False), (2, "K2", False), (3, "K3", False)])
+check("load AMS clears manual links it replaced", cap.settings()["slot_spools"], {"4": "OLD4"})
+check("load AMS tells how many slots to add", "add 4 filaments" in " ".join(notes[-1][3]), True)
+
+# slice check runs from the cached list and notifies
+cap.spools_at = time.time()
+cap.set_setting("slot_spools", {})
+cap.last_slice = {"grams": [600.0], "slots": slots[:1], "printer_name": H2C, "printer_code": "H2C", "deducted": False}
+notes.clear()
+cap._slice_check_job(cap.last_slice)
+check("slice check warns about the short spool", [c["kind"] for c in cap.last_slice["checks"]], ["low"])
+check("slice check notification", notes and notes[0][0] == 1 and "needs 600 g" in notes[0][1], True)
+posted = []
+cap.post = posted.append
+cap.set_setting("slot_spools", {"1": "K3"})  # relinked in Slots after the slice: the checks follow
+cap.push_state()
+st_msg = next(p for p in posted if p["type"] == "state")
+check("state carries the checks and settings", ([c["text"] for c in st_msg["last_slice"]["checks"]],
+                                                st_msg["settings"]["low_stock_g"]), (["Slot 1 needs 600 g, spool K3 has 500 g"], 150))
+check("state carries the quota", [p["remaining"] for p in posted if p["type"] == "quota"], [90])
+cap.set_setting("slice_checks", False)
+cap.push_state()
+check("checks cleared when turned off", "checks" in cap.last_slice, False)
+check("slice-check defaults", (m.DEFAULTS["slice_checks"], m.DEFAULTS["low_margin_g"], m.DEFAULTS["low_stock_g"]), (True, 10, 150))
 
 print("\npanel script written to", js_path)
 print("FAILURES:", fails)
