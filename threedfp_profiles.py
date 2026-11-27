@@ -4,7 +4,7 @@
 #
 # [tool.orcaslicer.plugin]
 # name = "3D Filament Profiles"
-# description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, and deduct what a print used from your 3DFP spools. Needs a 3DFP API key (subscription or Patreon)."
+# description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, and deduct what a print used from your 3DFP spools. Needs a 3DFP API key: API access is a paid, subscription-based add-on to a 3dfilamentprofiles.com account (also included in some Patreon tiers)."
 # author = "Andy Mackey"
 # version = "1.2.0"
 # ///
@@ -47,7 +47,7 @@ USER_AGENT = "OrcaSlicer-3DFP-Plugin/" + PLUGIN_VERSION
 
 FRIENDLY = {
     "invalid_key": "3DFP rejected the API key. Paste your key (starts with 3dfp_) in Settings.",
-    "no_access": "Your 3DFP account has no active API access (needs the API subscription or a Patreon tier).",
+    "no_access": "Your 3DFP account has no active API access (the API is a paid subscription add-on, also included in some Patreon tiers).",
     "blocked": "3DFP has blocked this account.",
     "rate_limited": "Monthly 3DFP API quota used up. It resets at 00:00 UTC on the 1st.",
     "no_base_preset": "3DFP has no OrcaSlicer base preset for this filament's material.",

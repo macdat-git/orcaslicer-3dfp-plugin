@@ -3,14 +3,15 @@
 # 3D Filament Profiles plugin for OrcaSlicer 2.5
 
 Connects OrcaSlicer to [3dfilamentprofiles.com](https://3dfilamentprofiles.com) via its API
-([docs](https://3dfilamentprofiles.com/docs/api)). It's a single file, `threedfp_profiles.py`, with no dependencies beyond Python's standard library.
+([docs](https://3dfilamentprofiles.com/docs/api)), a paid subscription add-on to a 3DFP account. Changes are listed in [CHANGELOG.md](CHANGELOG.md). It's a single file, `threedfp_profiles.py`, with no dependencies beyond Python's standard library.
 
 > Unofficial community plugin, not affiliated with 3D Filament Profiles or OrcaSlicer. Review generated filament
 > settings before printing: they come from community data.
 
 **Requirements**
 - OrcaSlicer **2.5 or newer**, which has the Python plugin system.
-- A 3DFP API key: the API subscription, or a Patreon tier that includes it.
+- A 3DFP API key. API access is a **paid, subscription-based add-on** to a 3dfilamentprofiles.com account (some Patreon
+  tiers include it). A free 3DFP account has no API access, and the plugin can't do anything without a key.
 
 It was developed and tested on Windows with a Bambu Lab H2C. The printer detection also covers the X1/P1/P2S/A1/A2L/H2/X2D
 families, and other printers get 3DFP's printer-neutral ("ANY") profile.
@@ -104,7 +105,7 @@ adding a spool. Without the service the setting is hidden and does nothing.
 1. OrcaSlicer → main menu → **Plugins** → the arrow on **Browse plugins** → **Install local plugin** → pick `threedfp_profiles.py`.
 2. Approve the permission prompt: HTTPS to `3dfilamentprofiles.com`, worker threads, and read access to Orca's temp slice folder.
 3. Select the plugin and press **Run** to open the panel. After that it opens by itself when a project opens; you can turn that off in Settings.
-4. **Settings** → paste your API key (`3dfp_…`, from the *API access* page in the 3DFP user menu; it needs the API subscription or a Patreon tier).
+4. **Settings** → paste your API key (`3dfp_…`, from the *API access* page in the 3DFP user menu; the API is a paid subscription add-on, or included in some Patreon tiers).
 
 To update the plugin, copy the new file over the installed copy at
 `%APPDATA%\OrcaSlicer\orca_plugins\threedfp_profiles.py\threedfp_profiles.py` and restart OrcaSlicer. That keeps the approved
