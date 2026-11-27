@@ -4,7 +4,7 @@
 #
 # [tool.orcaslicer.plugin]
 # name = "3D Filament Profiles"
-# description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, and deduct what a print used from your 3DFP spools. Needs a 3DFP API key: API access is a paid, subscription-based add-on to a 3dfilamentprofiles.com account (also included in some Patreon tiers)."
+# description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, or load every slot from the spools in your printer's AMS. Checks each slice for spools that are short of filament or don't match the slot, deducts what a print used from your 3DFP spools, and keeps a history with undo. Also: low stock filter, totals per material, mark a spool empty. Needs a 3DFP API key: API access is a paid, subscription-based add-on to a 3dfilamentprofiles.com account (also included in some Patreon tiers)."
 # author = "Andy Mackey"
 # version = "1.2.0"
 # ///
