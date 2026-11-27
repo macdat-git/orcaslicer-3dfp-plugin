@@ -60,8 +60,13 @@ remap a slot to a different tray there, pick that spool in **Slots** before send
 **Slot names:** OrcaSlicer numbers its filament slots 1, 2, 3…, which don't say where the spool is. The panel adds the position,
 named as in your 3DFP locations, so `Slot 1 (AMS: A-2)` is the spool in AMS A-2. For a slot you linked by hand it's that spool's
 position; otherwise it's the spool auto-link would pick for the slot (marked *auto*, and with *or* when two spools match
-equally). A slot whose spool isn't in this printer has no position. The Slots list, the **Use in slot** picker, *Last slice*
-and the slice-check warnings all use these names.
+equally). A slot you linked by hand to a spool that 3DFP has outside this printer shows that spool's location (such as
+`Shelf: To Review`) in the warning colour: pick the loaded spool, or press **Clear links** to remove all hand-picked links so
+auto-link takes over. The Slots list, the **Use in slot** picker, *Last slice* and the slice-check warnings all use these names.
+
+With auto-link on, the plugin doesn't link a slot to a spool just because it uses a preset that was linked to that spool
+before (one preset is often in several slots). With auto-link off it does, so a slot keeps its spool when you pick the same
+preset again.
 
 **Slice checks** (on by default, **Check each slice against your spools** in Settings): after each slice, the plugin looks at the
 spool each used slot would be deducted from and warns, in a notification and under *Last slice* in Slots, when:

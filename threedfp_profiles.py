@@ -6,7 +6,7 @@
 # name = "3D Filament Profiles"
 # description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, or load every slot from the spools in your printer's AMS. Checks each slice for spools that are short of filament or don't match the slot, deducts what a print used from your 3DFP spools, and keeps a history with undo. Also: low stock filter, totals per material, mark a spool empty. Needs a 3DFP API key: API access is a paid, subscription-based add-on to a 3dfilamentprofiles.com account (also included in some Patreon tiers)."
 # author = "Andy Mackey"
-# version = "1.2.0"
+# version = "1.2.1"
 # ///
 """OrcaSlicer 2.5 plugin for the 3D Filament Profiles API (https://3dfilamentprofiles.com/docs/api).
 
@@ -36,7 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 SITE = "https://3dfilamentprofiles.com"
 API_BASE = SITE + "/api/v1"
 USER_AGENT = "OrcaSlicer-3DFP-Plugin/" + PLUGIN_VERSION
@@ -535,8 +535,8 @@ def location_name(location):
 def slot_positions(slots, spools, printer_name, code="", manual=None, auto=True):
     """Where each OrcaSlicer filament slot's spool is in the printer, named as in 3DFP ('AMS: A-1').
     A slot linked by hand shows its spool's position; any other slot (with auto-link on) the spool auto-link would
-    pick for it. -> {"1": {"name": "AMS: A-1", "code": "K2", "source": "auto", "alts": ["AMS: A-3"]}}; a slot whose
-    spool isn't in this printer is left out."""
+    pick for it. -> {"1": {"name": "AMS: A-1", "code": "K2", "source": "auto", "alts": ["AMS: A-3"]}}. A slot linked by
+    hand to a spool that isn't in this printer gets that spool's 3DFP location and "away": True."""
     printer, here = printer_spools(spools, printer_name, code)
     if not printer or not slots:
         return {}
@@ -552,6 +552,9 @@ def slot_positions(slots, spools, printer_name, code="", manual=None, auto=True)
         sp = by_code.get(ln["code"])
         pos = spool_position((sp or {}).get("location"))
         if not pos or pos[0] != printer:
+            if ln["source"] == "manual":
+                out[k] = {"name": (sp or {}).get("location") or ("Shelf" if sp else "not in your 3DFP spools"),
+                          "code": ln["code"], "source": "manual", "alts": [], "away": True}
             continue
         out[k] = {"name": location_name(sp.get("location")), "code": ln["code"], "source": ln["source"],
                   "alts": [names.get(a, a) for a in ln.get("alts") or []]}
@@ -847,7 +850,8 @@ a{color:var(--accent);cursor:pointer;text-decoration:none}
 <section id="slots">
   <div class="card"><div class="label">Spool in each filament slot</div><div id="slotlist"></div>
   <div class="row" style="margin-top:8px"><button class="btn ghost" id="slref">Refresh slots</button>
-  <button class="btn ghost" id="loadams" title="Set every filament slot from the spools 3DFP has in this printer's AMS, in AMS order">Load my AMS</button></div></div>
+  <button class="btn ghost" id="loadams" title="Set every filament slot from the spools 3DFP has in this printer's AMS, in AMS order">Load my AMS</button>
+  <button class="btn ghost" id="clearlinks" title="Remove the spools you picked for slots by hand, so auto-link picks them">Clear links</button></div></div>
   <div class="card"><div class="label">Last slice</div><div id="slice" class="meta" style="white-space:normal">Slice a plate to see the grams per slot.</div>
   <div id="checks"></div>
   <div class="row" style="margin-top:8px"><button class="btn" id="deduct" disabled>Deduct from 3DFP spools</button>
@@ -952,7 +956,7 @@ function renderSlots(){const box=$('slotlist');if(!S.slots.length){box.innerHTML
  const opts=c=>'<option value="">\u2014 '+((S.settings||{}).auto_link?'auto':'no spool')+' \u2014</option>'+SPOOLS.filter(s=>s.remaining_grams>0||s.short_code===c).map(s=>'<option value="'+esc(s.short_code)+'"'+(s.short_code===c?' selected':'')+'>'+esc(s.short_code)+' \u00b7 '+spoolLabel(s)+' ('+esc(s.remaining_grams)+' g)</option>').join('')+
   (c&&!SPOOLS.some(s=>s.short_code===c)?'<option value="'+esc(c)+'" selected>'+esc(c)+'</option>':'');
  box.innerHTML=S.slots.map((s,i)=>{const c=S.slot_spools[String(i+1)]||'',p=pos(i+1);
-  const where=p?'<b>'+esc(p.name)+'</b>'+(p.alts&&p.alts.length?' or '+esc(p.alts.join(' / ')):'')+(p.source==='auto'?' <span title="The spool auto-link picks for this slot: same material, closest colour">(auto)</span>':'')+' \u00b7 ':'';
+  const where=p?'<b'+(p.away?' style="color:var(--warn)" title="This spool isn\'t in this printer on 3DFP: clear the link or pick the loaded spool"':'')+'>'+esc(p.name)+'</b>'+(p.alts&&p.alts.length?' or '+esc(p.alts.join(' / ')):'')+(p.source==='auto'?' <span title="The spool auto-link picks for this slot: same material, closest colour">(auto)</span>':'')+' \u00b7 ':'';
   return '<div class="slot">'+sw(s.color)+'<div class="meta" title="'+esc((p?p.name+' \u00b7 ':'')+'Slot '+(i+1)+': '+s.preset)+'">'+where+'Slot '+(i+1)+': '+esc(s.preset)+'</div><span></span><select data-slot="'+(i+1)+'">'+opts(c)+'</select></div>'}).join('');
  box.querySelectorAll('select').forEach(el=>el.onchange=()=>post({type:'map',slot:+el.dataset.slot,code:el.value}));
  const ls=S.last_slice;if(ls&&ls.grams&&ls.grams.length){const L=ls.links||ls.preview||{};$('slice').innerHTML=ls.grams.map((g,i)=>{const l=L[String(i+1)];return slotName(i+1)+': <b>'+g.toFixed(2)+' g</b>'+(l?' \u2192 '+esc(l.code)+(l.source==='auto'?' <span>(auto'+(pos(i+1)?'':', '+esc(l.where))+(l.alts&&l.alts.length?', or '+esc(l.alts.join('/')):'')+')</span>':''):(g>0.005?' \u2192 <span>no spool</span>':''))}).join('<br>')+
@@ -962,6 +966,7 @@ function renderSlots(){const box=$('slotlist');if(!S.slots.length){box.innerHTML
  const u=S.last_undo;$('undo').style.display=u?'':'none';$('undoinfo').textContent=u?'Last: '+u.text:'';}
 $('slref').onclick=()=>post({type:'state'});$('deduct').onclick=()=>post({type:'deduct'});
 $('loadams').onclick=()=>arm($('loadams'),'Replace slots?',()=>post({type:'load_ams'}));
+$('clearlinks').onclick=()=>arm($('clearlinks'),'Clear all?',()=>post({type:'clear_links'}));
 $('undo').onclick=()=>{const u=S.last_undo;if(u)arm($('undo'),'Put it back?',()=>post({type:'undo',id:u.id}))};
 function renderHistory(){const box=$('hlist');if(!HIST)return;if(!HIST.length){box.innerHTML='<div class="empty">Nothing yet. Deductions show here after a print.</div>';return}
  const K={deduct:'Deducted',empty:'Marked empty',undo:'Undone'};
@@ -996,7 +1001,7 @@ function onMsg(d){switch(d.type){
  case 'spools':SPOOLS=d.spools||[];renderSpools();renderSlots();break;
  case 'result':showResult(d);break;
  case 'busy':$('foot').classList.toggle('busy',!!d.on);$('status').textContent=d.text||(d.on?'Working\u2026':'Ready');
-  document.querySelectorAll('[data-act],[data-empty],[data-undo],#go,#sref,#deduct,#loadams,#undo').forEach(b=>{if(d.on)b.disabled=true;else if(b.id!=='deduct')b.disabled=false});if(!d.on)renderSlots();break;
+  document.querySelectorAll('[data-act],[data-empty],[data-undo],#go,#sref,#deduct,#loadams,#undo,#clearlinks').forEach(b=>{if(d.on)b.disabled=true;else if(b.id!=='deduct')b.disabled=false});if(!d.on)renderSlots();break;
  case 'quota':Q=d;renderQuota();break;
  case 'history':HIST=d.items||[];$('hinfo').textContent=HIST.length?HIST.length+' entr'+(HIST.length==1?'y':'ies')+', newest first.':'Deductions, spools marked empty and undos.';renderHistory();break;
  case 'refresh':post({type:'state'});break;}}
@@ -1327,7 +1332,9 @@ if orca is not None:
             st = self.host_state()
             slot_spools = dict(s.get("slot_spools") or {})
             changed = False
-            for i, sl in enumerate(st["slots"], 1):  # relink a slot whose preset we know a spool for
+            # relink a slot whose preset we know a spool for, only without auto-link: a preset is often in several
+            # slots, and auto-link finds each slot's spool from 3DFP's AMS locations instead
+            for i, sl in enumerate(st["slots"] if not s.get("auto_link", True) else [], 1):
                 code = (s.get("preset_spools") or {}).get(sl["preset"])
                 if code and str(i) not in slot_spools:
                     slot_spools[str(i)] = code
@@ -1501,6 +1508,16 @@ if orca is not None:
                     self.push_state()
                 elif t == "deduct":
                     self.start_deduct(manual=True)
+                elif t == "clear_links":
+                    n = len(self.settings().get("slot_spools") or {})
+                    self.set_setting("slot_spools", {})
+                    self.set_setting("preset_spools", {})
+                    self.log("cleared %d manual slot links" % n)
+                    self.result(True, "Cleared %d slot link%s" % (n, "" if n == 1 else "s"),
+                                ["Slots now use auto-link: the spool 3DFP has in this printer's AMS with the same "
+                                 "material and the closest colour." if self.settings().get("auto_link", True)
+                                 else "Pick a spool for each slot, or turn on auto-link in Settings."])
+                    self.push_state()
                 elif t == "history":
                     self.post({"type": "history", "items": list(reversed(self.history()))})
                 elif t == "undo":

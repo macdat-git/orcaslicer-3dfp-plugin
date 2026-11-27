@@ -237,10 +237,12 @@ check("location name HT", m.location_name("Printer: H2C, AMS: HT-A-1"), "AMS: HT
 check("location name external", m.location_name("Printer: P2S, External Spool"), "External Spool")
 check("location name shelf", m.location_name("Shelf: Closet Shelf 3"), "")
 ps = m.slot_positions(slots, spools, H2C, "H2C", {"5": "S9"})
-check("positions from auto-link", {k: v["name"] for k, v in ps.items()},
+check("positions from auto-link", {k: v["name"] for k, v in ps.items() if not v.get("away")},
       {"1": "AMS: A-2", "2": "AMS: A-1", "3": "AMS: B-4", "4": "AMS: A-3"})
 check("tie shows the other position", ps["1"]["alts"], ["AMS: A-3"])
-check("manual link on a shelf has no position", "5" in ps, False)
+check("manual link on a shelf shows where the spool is", (ps["5"]["name"], ps["5"]["away"]), ("Shelf", True))
+check("manual link to an unknown spool", m.slot_positions(slots[:1], spools, H2C, "H2C", {"1": "GONE"})["1"]["name"],
+      "not in your 3DFP spools")
 check("manual link in the printer", m.slot_positions(slots[:1], spools, H2C, "H2C", {"1": "A6"})["1"]["name"], "AMS: HT-A-1")
 check("auto-link off: only manual links", list(m.slot_positions(slots, spools, H2C, "H2C", {"2": "G4"}, auto=False)), ["2"])
 check("printer not in 3DFP: no positions", m.slot_positions(slots, spools, "Voron 2.4"), {})
@@ -405,6 +407,24 @@ check("state carries the quota", [p["remaining"] for p in posted if p["type"] ==
 cap.set_setting("slice_checks", False)
 cap.push_state()
 check("checks cleared when turned off", "checks" in cap.last_slice, False)
+# a preset used in several slots no longer copies one spool into all of them while auto-link is on
+cap.set_setting("slice_checks", True)
+cap.set_setting("slot_spools", {})
+cap.set_setting("preset_spools", {"Bambu PETG Basic @BBL H2C": "K3"})
+cap.host_state = lambda: {"printer_name": H2C, "printer_code": "H2C", "nozzle": "0.4", "slots": slots, "catalog": {},
+                          "all_filaments": [], "user_dir": "", "app_version": "", "signed_in": False}
+posted.clear()
+cap.push_state()
+check("no preset relink with auto-link", cap.settings()["slot_spools"], {})
+st_msg = next(p for p in posted if p["type"] == "state")
+check("state names the slots", {k: v["name"] for k, v in st_msg["slot_pos"].items()},
+      {"1": "AMS: A-2", "2": "AMS: A-1", "3": "AMS: B-4", "4": "AMS: A-3"})  # slot 5 is ABS: no ABS loaded
+cap.set_setting("auto_link", False)
+cap.push_state()
+check("preset relink without auto-link", cap.settings()["slot_spools"], {"1": "K3", "2": "K3", "4": "K3"})
+cap.set_setting("auto_link", True)
+cap.on_message({"type": "clear_links"})
+check("clear links", (cap.settings()["slot_spools"], cap.settings()["preset_spools"]), ({}, {}))
 check("slice-check defaults", (m.DEFAULTS["slice_checks"], m.DEFAULTS["low_margin_g"], m.DEFAULTS["low_stock_g"]), (True, 10, 150))
 
 print("\npanel script written to", js_path)

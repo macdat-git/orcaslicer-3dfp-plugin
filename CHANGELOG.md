@@ -3,6 +3,20 @@
 The 3DFP API that this plugin uses is a paid, subscription-based add-on to a 3dfilamentprofiles.com account
 (also included in some Patreon tiers). Without an API key the plugin can't do anything.
 
+## 1.2.1 (2026-11-27)
+
+**Slot names.** Slots are shown with their position as named in your 3DFP locations, e.g. `Slot 1 (AMS: A-2)` or
+`Slot 3 (AMS: HT-A-1)`, in the Slots list, the **Use in slot** picker, *Last slice* and the slice-check warnings. The position
+comes from the spool linked to the slot, or the one auto-link would pick (marked *auto*). A slot linked by hand to a spool
+that 3DFP has outside this printer shows that spool's location, such as `Shelf: To Review`, in the warning colour.
+
+**Links no longer copy between slots.** With auto-link on, a slot is no longer linked to a spool just because it uses a
+filament preset that was linked to that spool before. That linked the same spool to every slot using that preset, and
+those links overrode auto-link. Without auto-link it works as before.
+
+**Clear links** (Slots) removes all the spools you picked for slots by hand, so auto-link picks each slot's spool from
+3DFP's AMS locations. Press it twice to confirm.
+
 ## 1.2.0 (2026-11-27)
 
 **Slice checks.** After each slice, the plugin checks the spool each used slot would be deducted from. It warns, in a
@@ -33,10 +47,6 @@ again, e.g. after linking the right spool. Deductions logged by earlier versions
 
 **API quota.** Settings shows the requests left this month and when that was last seen, also after a restart. You get one
 warning a month when fewer than 100 are left. The quota is per account, so it includes other tools that use your key.
-
-**Slot names.** Slots are shown with their position as named in your 3DFP locations, e.g. `Slot 1 (AMS: A-2)` or
-`Slot 3 (AMS: HT-A-1)`, in the Slots list, the **Use in slot** picker, *Last slice* and the slice-check warnings. The position
-comes from the spool linked to the slot, or the one auto-link would pick (marked *auto*).
 
 **Description.** The plugin description and README now say that the 3DFP API is a paid subscription add-on.
 
