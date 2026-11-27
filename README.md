@@ -47,7 +47,7 @@ Which spool a slot uses:
 2. Otherwise (**Link slots to spools automatically**, on by default), the spool your 3DFP spool list places in the
    selected printer's AMS. It must have the same filament type, and the closest colour wins. On a tie, the first AMS
    position wins, and the other spool is shown as an alternative. The plugin re-reads your spools when the print starts
-   (one more request), so the 3DFP locations need to be current. A tool that syncs AMS slots to 3DFP locations keeps
+   (one more request), so the 3DFP locations need to be current. [3DFP AMS Sync](#3dfp-ams-sync) keeps
    them current, or you can set them on 3DFP by hand. 3DFP locations look like `Printer: H2C, AMS: A-1`, `Printer: H2C, AMS: HT-A-1` or
    `Printer: P2S, External Spool`. The printer name (`H2C`) must appear in the OrcaSlicer printer preset name.
 3. A slot that used filament but gets no spool isn't deducted, and a warning notification says which slot and why.
@@ -56,6 +56,22 @@ The plugin can't see the AMS mapping you confirm in the send dialog: the OrcaSli
 remap a slot to a different tray there, pick that spool in **Slots** before sending.
 
 Slices, print starts, the links chosen and each deduction are logged to `events.log` in the plugin's data folder.
+
+## 3DFP AMS Sync
+
+[**3DFP AMS Sync**](https://github.com/macdat-git/3dfp-ams-sync) is a separate, optional companion service for Windows. It watches
+your Bambu Lab printers over the local network and moves spools between 3DFP locations as you load and unload the AMS, so the
+auto-link above always finds the right spool. It also adds new Bambu RFID spools to your 3DFP spools. To get it:
+
+1. Download it from GitHub (**Code → Download ZIP** on the [repository page](https://github.com/macdat-git/3dfp-ams-sync)) and unpack it, or
+   run `git clone https://github.com/macdat-git/3dfp-ams-sync.git`.
+2. Follow the setup in its README: Python 3.10+, your printers' access codes, and a 3DFP location for each AMS slot. It reads the API key
+   from this plugin's settings, so you don't enter it twice.
+3. Start it in dry run mode, check what it would do, then switch it to live and add the logon task.
+
+While the service runs, it leaves an `ams_sync.json` file in this plugin's data folder, and Settings then shows **Add new RFID spools to
+3DFP** (on by default). The plugin only stores that choice, as `ams_add_spools` in `settings.json`; the service reads it before
+adding a spool. Without the service the setting is hidden and does nothing.
 
 ## Install
 

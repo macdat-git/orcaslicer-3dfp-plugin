@@ -6,7 +6,7 @@
 # name = "3D Filament Profiles"
 # description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, and deduct what a print used from your 3DFP spools. Needs a 3DFP API key (subscription or Patreon)."
 # author = "Andy Mackey"
-# version = "1.1.1"
+# version = "1.1.2"
 # ///
 """OrcaSlicer 2.5 plugin for the 3D Filament Profiles API (https://3dfilamentprofiles.com/docs/api).
 
@@ -32,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PLUGIN_VERSION = "1.1.1"
+PLUGIN_VERSION = "1.1.2"
 SITE = "https://3dfilamentprofiles.com"
 API_BASE = SITE + "/api/v1"
 USER_AGENT = "OrcaSlicer-3DFP-Plugin/" + PLUGIN_VERSION
@@ -719,7 +719,8 @@ a{color:var(--accent);cursor:pointer;text-decoration:none}
   <label class="check"><input type="checkbox" id="s_color"><span><b>Set the slot colour</b> from the filament</span></label>
   <label class="check"><input type="checkbox" id="s_offer"><span><b>Offer to deduct</b> filament from 3DFP spools when a print starts</span></label>
   <label class="check"><input type="checkbox" id="s_auto"><span><b>Deduct without asking</b> when a print starts</span></label>
-  <label class="check"><input type="checkbox" id="s_link"><span><b>Link slots to spools automatically</b><br><span class="meta" style="white-space:normal">A slot with no spool picked in Slots uses the spool 3DFP has in this printer's AMS with the same type and closest colour (keep 3DFP locations current, e.g. with AMS sync).</span></span></label>
+  <label class="check"><input type="checkbox" id="s_link"><span><b>Link slots to spools automatically</b><br><span class="meta" style="white-space:normal">A slot with no spool picked in Slots uses the spool 3DFP has in this printer's AMS with the same type and closest colour (keep 3DFP locations current, e.g. with 3DFP AMS Sync: github.com/macdat-git/3dfp-ams-sync).</span></span></label>
+  <div id="amsbox" style="display:none"><label class="check"><input type="checkbox" id="s_amsadd"><span><b>Add new RFID spools to 3DFP</b><br><span class="meta" style="white-space:normal">For the 3DFP AMS Sync service on this PC: a Bambu RFID spool that isn't in 3DFP yet is added to your spools and placed in its AMS slot.</span></span></label></div>
   <label class="check"><input type="checkbox" id="s_open"><span><b>Open this panel</b> when OrcaSlicer opens a project</span></label>
 </section>
 <div id="out"></div>
@@ -787,9 +788,10 @@ $('slref').onclick=()=>post({type:'state'});$('deduct').onclick=()=>post({type:'
 function fillSettings(){const st=S.settings||{};const sel=$('s_printer');sel.innerHTML=(S.printer_choices||['auto']).map(p=>'<option'+(p===st.printer?' selected':'')+'>'+esc(p)+'</option>').join('');
  $('s_nozzle').value=st.nozzle||'auto';$('s_pa').checked=!!st.pressure_advance;$('s_save').checked=!!st.save_preset;$('s_color').checked=!!st.set_color;
  $('s_offer').checked=!!st.offer_deduct;$('s_auto').checked=!!st.auto_deduct;$('s_link').checked=!!st.auto_link;$('s_open').checked=!!st.auto_open;
+ $('s_amsadd').checked=!!st.ams_add_spools;$('amsbox').style.display=S.ams_sync?'':'none';
  $('keyinfo').textContent=S.has_key?'Saved key ends in \u2026'+S.key_tail+'. Paste a new one to replace it.':'Starts with 3dfp_. Stored in this plugin\'s data folder.';}
 [['s_printer','printer'],['s_nozzle','nozzle']].forEach(([id,k])=>$(id).onchange=()=>post({type:'set',key:k,value:$(id).value}));
-[['s_pa','pressure_advance'],['s_save','save_preset'],['s_color','set_color'],['s_offer','offer_deduct'],['s_auto','auto_deduct'],['s_link','auto_link'],['s_open','auto_open']].forEach(([id,k])=>$(id).onchange=()=>post({type:'set',key:k,value:$(id).checked}));
+[['s_pa','pressure_advance'],['s_save','save_preset'],['s_color','set_color'],['s_offer','offer_deduct'],['s_auto','auto_deduct'],['s_link','auto_link'],['s_open','auto_open'],['s_amsadd','ams_add_spools']].forEach(([id,k])=>$(id).onchange=()=>post({type:'set',key:k,value:$(id).checked}));
 $('savekey').onclick=()=>{const v=$('key').value.trim();if(v){post({type:'set',key:'api_key',value:v});$('key').value=''}};
 function showResult(r){const ul=a=>a&&a.length?'<ul>'+a.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'';
  $('out').innerHTML='<div class="msg '+(r.ok?'ok':'err')+'"><b>'+esc(r.title)+'</b>'+ul(r.lines)+(r.more&&r.more.length?'<details><summary>Details</summary>'+ul(r.more)+'</details>':'')+'</div>';
@@ -828,6 +830,7 @@ DEFAULTS = {
     "auto_deduct": True,   # deduct as soon as a print is sent (the result shows as a notification)
     "auto_link": True,     # match used slots to the spools 3DFP has in this printer's AMS
     "auto_open": True,
+    "ams_add_spools": True,  # read by the 3DFP AMS Sync service, if one runs on this PC (it leaves ams_sync.json here)
     "slot_spools": {},     # {"1": "ABC123"}
     "preset_spools": {},   # {preset name: short code}, to relink a slot when that preset is selected again
 }
@@ -913,6 +916,11 @@ if orca is not None:
             _write_json("settings.json", s)
             if key == "api_key":
                 self.client = None
+
+        def ams_sync(self):
+            """True when the 3DFP AMS Sync service runs on this PC: it writes ams_sync.json into this folder."""
+            m = _read_json("ams_sync.json", None)
+            return isinstance(m, dict) and m.get("service") == "3DFP AMS Sync"
 
         def api(self):
             if self.client is None:
@@ -1146,7 +1154,8 @@ if orca is not None:
                 "type": "state", "printer_name": st["printer_name"], "printer_code": st["printer_code"],
                 "nozzle": st["nozzle"], "slots": st["slots"], "slot_spools": slot_spools,
                 "settings": {k: s[k] for k in ("printer", "nozzle", "pressure_advance", "save_preset", "set_color",
-                                               "offer_deduct", "auto_deduct", "auto_link", "auto_open")},
+                                               "offer_deduct", "auto_deduct", "auto_link", "auto_open", "ams_add_spools")},
+                "ams_sync": self.ams_sync(),
                 "printer_choices": PRINTER_CHOICES, "has_key": bool(key), "key_tail": key[-4:] if key else "",
                 "spools": self.spools, "last_slice": {k: v for k, v in ls.items() if k in ("grams", "when", "deducted", "preview", "links")},
                 "plan_ok": bool(plan) or bool(ls.get("grams") and s.get("auto_link", True) and key),

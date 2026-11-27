@@ -243,6 +243,10 @@ check("settings persist", cap.settings()["printer"], "P2S")
 check("defaults kept", cap.settings()["save_preset"], True)
 check("auto-link on by default", cap.settings()["auto_link"], True)
 check("auto-deduct on by default", m.DEFAULTS["auto_deduct"], True)
+check("AMS add-spools on by default", cap.settings()["ams_add_spools"], True)
+check("AMS sync setting hidden without the service", cap.ams_sync(), False)
+mo._write_json("ams_sync.json", {"service": "3DFP AMS Sync", "mode": "live"})
+check("AMS sync setting shown when the service left its marker", cap.ams_sync(), True)
 cap.set_setting("auto_deduct", False)  # the offer-to-deduct path below
 
 # the print-start path with a stub UI and API: auto-links, then offers to deduct
