@@ -45,7 +45,9 @@ without asking** in Settings, you get a notification with a **Deduct** link inst
 button in Slots. The deduction itself is one API request.
 
 Which spool a slot uses:
-1. The spool you picked for it in **Slots** (or set with **Use in slot** on a spool), if any.
+1. The spool you picked for it in **Slots** (or set with **Use in slot** on a spool), if any. With auto-link on, a spool
+   that 3DFP has somewhere other than this printer (on a shelf, in the other printer) was swapped out since you picked it:
+   if a spool in the printer's AMS matches the slot, auto-link uses that one instead, and the slice check says so.
 2. Otherwise (**Link slots to spools automatically**, on by default), the spool your 3DFP spool list places in the
    selected printer's AMS. It must have the same filament type, and the closest colour wins. On a tie, the first AMS
    position wins, and the other spool is shown as an alternative. The plugin re-reads your spools when the print starts
@@ -74,7 +76,7 @@ spool each used slot would be deducted from and warns, in a notification and und
   several slots is checked against their total;
 - the spool's material doesn't match the slot's filament type (PLA slot, PETG spool), or its colour is clearly different;
 - a slot you linked by hand has a spool that 3DFP has somewhere other than this printer (on a shelf, in the other printer), which
-  usually means the spool was swapped since;
+  usually means the spool was swapped since (with auto-link on, the warning says which AMS spool is used instead);
 - a linked spool isn't in your 3DFP spools any more.
 
 It uses the spool list the plugin already has, and reloads it (one request) only when it's more than an hour old.

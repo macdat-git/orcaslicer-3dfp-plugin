@@ -3,6 +3,14 @@
 The 3DFP API that this plugin uses is a paid, subscription-based add-on to a 3dfilamentprofiles.com account
 (also included in some Patreon tiers). Without an API key the plugin can't do anything.
 
+## 1.2.2 (2026-11-27)
+
+**Old slot links no longer deduct from the wrong spool.** With auto-link on, a slot linked by hand to a spool that 3DFP
+has somewhere other than this printer (on a shelf, in the other printer) uses the matching spool in the printer's AMS
+instead, because the linked spool was swapped out. The slice check says which spool is used and where the old one is. If
+no AMS spool matches the slot, the hand link is still used. Before, a stale link to a spool on a shelf was deducted even
+though the right spool was in the AMS.
+
 ## 1.2.1 (2026-11-27)
 
 **Slot names.** Slots are shown with their position as named in your 3DFP locations, e.g. `Slot 1 (AMS: A-2)` or

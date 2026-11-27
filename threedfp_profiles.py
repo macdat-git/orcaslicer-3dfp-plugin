@@ -6,7 +6,7 @@
 # name = "3D Filament Profiles"
 # description = "Connects OrcaSlicer to 3dfilamentprofiles.com: search the filament catalog or your own spools, pull a ready-made OrcaSlicer filament preset (your calibrated values for your spools), apply it to a filament slot and save it as a user preset, or load every slot from the spools in your printer's AMS. Checks each slice for spools that are short of filament or don't match the slot, deducts what a print used from your 3DFP spools, and keeps a history with undo. Also: low stock filter, totals per material, mark a spool empty. Needs a 3DFP API key: API access is a paid, subscription-based add-on to a 3dfilamentprofiles.com account (also included in some Patreon tiers)."
 # author = "Andy Mackey"
-# version = "1.2.1"
+# version = "1.2.2"
 # ///
 """OrcaSlicer 2.5 plugin for the 3D Filament Profiles API (https://3dfilamentprofiles.com/docs/api).
 
@@ -36,7 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PLUGIN_VERSION = "1.2.1"
+PLUGIN_VERSION = "1.2.2"
 SITE = "https://3dfilamentprofiles.com"
 API_BASE = SITE + "/api/v1"
 USER_AGENT = "OrcaSlicer-3DFP-Plugin/" + PLUGIN_VERSION
@@ -479,19 +479,28 @@ def colour_distance(a, b):
 def link_slots(slots, grams, spools, printer_name, code="", manual=None):
     """Choose a spool for every slot that used filament.
     slots: [{"preset", "color", "type"}] (slot 1 first); grams: per-slot grams; manual: {"1": short code} links the
-    user set, which win. -> (links {"1": {"code", "source", "where", "alts"}}, unmatched [{"slot", "why"}])."""
+    user set, which win, unless 3DFP has that spool somewhere other than this printer and a spool in this printer's
+    AMS matches the slot: then the link is stale (the spool was swapped) and the AMS spool is used, with "replaced": the
+    hand-linked code. -> (links {"1": {"code", "source", "where", "alts"}}, unmatched [{"slot", "why"}])."""
     manual = manual or {}
-    links, unmatched, taken = {}, [], set()
+    links, unmatched, taken, away = {}, [], set(), {}
     used = [str(i) for i, g in enumerate(grams or [], 1) if g and g > 0.005]
-    for k in used:
-        if manual.get(k):
-            links[k] = {"code": manual[k], "source": "manual", "where": "", "alts": []}
-            taken.add(manual[k])
     printer, here = printer_spools(spools, printer_name, code)
+    by_code = {sp.get("short_code"): sp for sp in spools or []}
+    for k in used:
+        c = manual.get(k)
+        if not c:
+            continue
+        pos = spool_position((by_code.get(c) or {}).get("location"))
+        if printer and c in by_code and (not pos or pos[0] != printer):
+            away[k] = c  # decided after the auto-links: kept only if no AMS spool matches
+            continue
+        links[k] = {"code": c, "source": "manual", "where": "", "alts": []}
+        taken.add(c)
     for k in used:
         if k in links:
             continue
-        sl = slots[int(k) - 1] if int(k) <= len(slots) else {}
+        sl =slots[int(k) - 1] if int(k) <= len(slots) else {}
         if not here:
             unmatched.append({"slot": k, "why": "3DFP has no spools in a printer named like “%s”" % (printer_name or code)})
             continue
@@ -504,12 +513,18 @@ def link_slots(slots, grams, spools, printer_name, code="", manual=None):
                 cands.append((-ts, round(colour_distance(sl.get("color"), sp.get("rgb"))), sp.get("short_code") in taken,
                               key, label, sp))
         if not cands:
-            unmatched.append({"slot": k, "why": "no %s spool in %s's AMS on 3DFP" % (sl.get("type") or "matching", printer)})
+            if k in away:  # nothing in the AMS fits: keep the hand link (slice checks flag it as stale)
+                links[k] = {"code": away[k], "source": "manual", "where": "", "alts": []}
+                taken.add(away[k])
+            else:
+                unmatched.append({"slot": k, "why": "no %s spool in %s's AMS on 3DFP" % (sl.get("type") or "matching", printer)})
             continue
         cands.sort(key=lambda c: c[:4])
         best = cands[0]
         alts = [c[4] for c in cands[1:] if c[0] == best[0] and abs(c[1] - best[1]) <= 1]
         links[k] = {"code": best[5].get("short_code"), "source": "auto", "where": "%s %s" % (printer, best[4]), "alts": alts}
+        if k in away:
+            links[k]["replaced"] = away[k]
         taken.add(best[5].get("short_code"))
     return links, unmatched
 
@@ -590,6 +605,11 @@ def slice_checks(grams, slots, links, spools, printer_name, code="", margin=10):
                 and colour_distance(sl.get("color"), sp.get("rgb")) > COLOUR_WARN:
             out.append({"slot": k, "kind": "colour", "text": "%s colour %s doesn't look like spool %s (%s %s)" % (
                 name, first_hex(sl.get("color")), c, sp.get("color") or "", first_hex(sp.get("rgb")))})
+        if ln.get("replaced"):
+            old = by_code.get(ln["replaced"]) or {}
+            out.append({"slot": k, "kind": "relinked", "text": "%s uses %s from the AMS, not %s that you linked: 3DFP has "
+                        "that one at “%s” (Clear links in Slots removes old links)" % (
+                            name, c, ln["replaced"], old.get("location") or "Shelf")})
         if ln.get("source") == "manual" and printer:
             if not pos or pos[0] != printer:
                 out.append({"slot": k, "kind": "stale", "text": "Slot %s is linked to %s, which 3DFP has at “%s”, not in %s" % (
@@ -1806,11 +1826,16 @@ if orca is not None:
             ls = self.last_slice
             grams = ls.get("grams") or []
             manual = dict(s.get("slot_spools") or {})
-            need = [str(k) for k, g in enumerate(grams, 1) if g > 0.005 and not manual.get(str(k))]
             if not s.get("auto_link", True):
                 links, _ = link_slots([], grams, [], "", "", manual)
-                unmatched = [{"slot": k, "why": "no spool linked"} for k in need]
+                unmatched = [{"slot": str(k), "why": "no spool linked"} for k, g in enumerate(grams, 1)
+                             if g > 0.005 and not manual.get(str(k))]
             else:
+                # reload the spools when a slot needs auto-link: no hand link, or one to a spool 3DFP had elsewhere
+                printer = printer_spools(self.spools, ls.get("printer_name", ""), ls.get("printer_code", ""))[0]
+                loc = {sp.get("short_code"): spool_position(sp.get("location")) for sp in self.spools}
+                need = [k for k, g in enumerate(grams, 1) if g > 0.005 and (
+                    not manual.get(str(k)) or (printer and (loc.get(manual[str(k)]) or ("",))[0] != printer))]
                 if need and refresh and s.get("api_key"):
                     self.job_spools()
                 links, unmatched = link_slots(ls.get("slots") or [], grams, self.spools, ls.get("printer_name", ""),

@@ -205,6 +205,18 @@ check("manual link wins", (links["1"]["code"], links["1"]["source"]), ("MANUAL",
 check("no ABS in the AMS", [u["slot"] for u in unmatched], ["5"])
 check("empty spool skipped", m.link_slots([{"type": "PLA", "color": "#FFFFFF"}], [1.0], [spools[6]], H2C)[0], {})
 check("printer not in 3DFP", m.link_slots(slots, [1.0], spools, "Voron 2.4")[1][0]["slot"], "1")
+# a hand link to a spool 3DFP has on a shelf (swapped out) gives way to the matching AMS spool
+links, unmatched = m.link_slots(slots, [0, 7.0], spools, H2C, manual={"2": "S9"})
+check("stale hand link replaced by the AMS spool", (links["2"]["code"], links["2"]["source"], links["2"].get("replaced")),
+      ("Y1", "auto", "S9"))
+links, unmatched = m.link_slots(slots, [0, 0, 0, 0, 4.0], spools, H2C, manual={"5": "S9"})
+check("stale hand link kept when no AMS spool fits", (links["5"]["code"], links["5"]["source"], unmatched), ("S9", "manual", []))
+check("hand link in the printer still wins", m.link_slots(slots, [0, 7.0], spools, H2C, manual={"2": "K2"})[0]["2"]["code"], "K2")
+check("hand link to a spool on another printer replaced",
+      m.link_slots(slots, [0, 0, 1.0], spools, H2C, manual={"3": "P8"})[0]["3"].get("replaced"), "P8")
+check("hand link without a spool list kept", m.link_slots(slots, [0, 7.0], [], H2C, manual={"2": "S9"})[0]["2"]["code"], "S9")
+ck = m.slice_checks([0, 7.0], slots, m.link_slots(slots, [0, 7.0], spools, H2C, manual={"2": "S9"})[0], spools, H2C, "H2C", 0)
+check("replaced link is reported", [c["kind"] for c in ck], ["relinked"])
 
 # --- slice checks: short spool, type / colour mismatch, stale manual link
 low = [sp("K2", "PETG", "Basic", "#000000", "Printer: H2C, AMS: A-2", 12),
